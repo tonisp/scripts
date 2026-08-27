@@ -1,0 +1,265 @@
+Järgnevaid käske tee postgresql baasis ning root kasutajana õiges andmebaasis ehk
+mine üldise postgres kasutaja all psql-iga õigesse andmebaasi (psql -d andmebaasinimi):
+
+
+
+-- 1. LOOME AUDITITABELI (kui juba olemas, siis andmed säilivad)
+CREATE TABLE IF NOT EXISTS audit_log_db (
+    id BIGSERIAL PRIMARY KEY,
+    table_name TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    old_data jsonb,
+    new_data jsonb,
+    changed_fields jsonb,
+    changed_by TEXT DEFAULT current_user,
+    changed_at TIMESTAMP WITH TIME ZONE DEFAULT clock_timestamp()
+);
+-- Jada ehk sequence osa
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'audit_log_db_id_seq' AND relkind = 'S') THEN
+        CREATE SEQUENCE public.audit_log_db_id_seq
+            INCREMENT BY 1
+            MINVALUE 1
+            MAXVALUE 9223372036854775807
+            START 1
+            CACHE 1
+            NO CYCLE;
+        -- Seame jada väärtuse õigeks (kui tabelis on juba andmeid, jätkab sealt, muidu alustab 1-st)
+        EXECUTE 'SELECT setval(''public.audit_log_db_id_seq'', COALESCE((SELECT MAX(id) FROM public.audit_log_db), 1))';
+        -- Määrame jada tabeli ID veeru vaikeväärtuseks
+        ALTER TABLE public.audit_log_db ALTER COLUMN id SET DEFAULT nextval('public.audit_log_db_id_seq'::regclass);
+        -- Seome jada tabeliga (et DROP TABLE kustutaks ka jada)
+        ALTER SEQUENCE public.audit_log_db_id_seq OWNED BY public.audit_log_db.id;
+    END IF;
+    RAISE NOTICE 'Värskendame audit_log_db tabeli indeksit';
+    REINDEX TABLE public.audit_log_db;
+END $$;
+--Seame natuke audit_log_db tabeli õigusi igaks juhuks üle
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON audit_log_db FROM PUBLIC;
+GRANT SELECT ON audit_log_db TO PUBLIC;
+
+-- 2. LOOME FUNKTSIOONI LOGI KAITSEKS (kustutab enne vana koos sõltuvustega)
+DROP FUNCTION IF EXISTS protect_audit_log_db() CASCADE;
+CREATE OR REPLACE FUNCTION protect_audit_log_db()
+RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'Database audit log data cannot be modified, deleted or truncated';
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Lisame kaitsetriggeri ridade muutmise ja kustutamise vastu (FOR EACH ROW)
+CREATE OR REPLACE TRIGGER trg_protect_audit_log_row
+BEFORE UPDATE OR DELETE ON audit_log_db
+FOR EACH ROW EXECUTE FUNCTION protect_audit_log_db();
+
+-- Lisame eraldi kaitsetriggeri tabeli tühjendamise vastu (FOR EACH STATEMENT)
+CREATE OR REPLACE TRIGGER trg_protect_audit_log_stmt
+BEFORE TRUNCATE ON audit_log_db
+FOR EACH STATEMENT EXECUTE FUNCTION protect_audit_log_db();
+
+-- 3. LOOME PEAMISE LOGIMISFUNKTSIOONI
+CREATE OR REPLACE FUNCTION process_audit_log_db()
+RETURNS TRIGGER AS $$
+DECLARE
+    diff_fields jsonb := '{}'::jsonb;
+    old_row jsonb;
+    new_row jsonb;
+    key_name text;
+    old_val_json jsonb;
+    new_val_json jsonb;
+    row_limit int := 10000000;
+    current_log_id bigint;
+    
+    field_type text;
+    old_geom_text text;
+    new_geom_text text;
+    
+    log_old_data jsonb;
+    log_new_data jsonb;
+BEGIN
+    IF (TG_TABLE_NAME = 'audit_log_db') THEN
+        RETURN NULL;
+    END IF;
+
+    IF (TG_OP = 'DELETE') THEN
+        old_row := to_jsonb(OLD);
+        log_old_data := old_row;
+        
+        FOR key_name IN SELECT jsonb_object_keys(old_row)
+        LOOP
+            EXECUTE format('SELECT pg_typeof(($1).%I)::text', key_name) USING OLD INTO field_type;
+            IF field_type IN ('geometry', 'geography') THEN
+                EXECUTE format('SELECT ST_AsText(($1).%I)', key_name) USING OLD INTO old_geom_text;
+                log_old_data := log_old_data || jsonb_build_object(key_name, old_geom_text);
+            END IF;
+        END LOOP;
+
+        INSERT INTO audit_log_db (table_name, operation, old_data, changed_by)
+        VALUES (TG_TABLE_NAME, TG_OP, log_old_data, session_user)
+        RETURNING id INTO current_log_id;
+        
+    ELSIF (TG_OP = 'INSERT') THEN
+        new_row := to_jsonb(NEW);
+        log_new_data := new_row;
+        
+        FOR key_name IN SELECT jsonb_object_keys(new_row)
+        LOOP
+            EXECUTE format('SELECT pg_typeof(($1).%I)::text', key_name) USING NEW INTO field_type;
+            IF field_type IN ('geometry', 'geography') THEN
+                EXECUTE format('SELECT ST_AsText(($1).%I)', key_name) USING NEW INTO new_geom_text;
+                log_new_data := log_new_data || jsonb_build_object(key_name, new_geom_text);
+            END IF;
+        END LOOP;
+
+        INSERT INTO audit_log_db (table_name, operation, new_data, changed_by)
+        VALUES (TG_TABLE_NAME, TG_OP, log_new_data, session_user)
+        RETURNING id INTO current_log_id;
+        
+    ELSIF (TG_OP = 'UPDATE') THEN
+        old_row := to_jsonb(OLD);
+        new_row := to_jsonb(NEW);
+        log_old_data := old_row;
+        log_new_data := new_row;
+
+        FOR key_name IN SELECT jsonb_object_keys(old_row)
+        LOOP
+            EXECUTE format('SELECT pg_typeof(($1).%I)::text', key_name) USING OLD INTO field_type;
+            
+            IF field_type IN ('geometry', 'geography') THEN
+                EXECUTE format('SELECT ST_AsText(($1).%I)', key_name) USING OLD INTO old_geom_text;
+                EXECUTE format('SELECT ST_AsText(($1).%I)', key_name) USING NEW INTO new_geom_text;
+                
+                log_old_data := log_old_data || jsonb_build_object(key_name, old_geom_text);
+                log_new_data := log_new_data || jsonb_build_object(key_name, new_geom_text);
+            END IF;
+        END LOOP;
+
+        FOR key_name, old_val_json IN SELECT * FROM jsonb_each(log_old_data)
+        LOOP
+            new_val_json := log_new_data -> key_name;
+            
+            IF (old_val_json IS DISTINCT FROM new_val_json) THEN
+                diff_fields := diff_fields || jsonb_build_object(
+                    key_name, 
+                    jsonb_build_object('old', old_val_json, 'new', new_val_json)
+                );
+            END IF;
+        END LOOP;
+
+        IF (diff_fields <> '{}'::jsonb) THEN
+            INSERT INTO audit_log_db (table_name, operation, old_data, new_data, changed_fields, changed_by)
+            VALUES (TG_TABLE_NAME, TG_OP, log_old_data, log_new_data, diff_fields, session_user)
+            RETURNING id INTO current_log_id;
+        END IF;
+    END IF;
+
+    IF (current_log_id IS NOT NULL AND random() < 0.01) THEN
+        ALTER TABLE audit_log_db DISABLE TRIGGER trg_protect_audit_log_row;
+        ALTER TABLE audit_log_db DISABLE TRIGGER trg_protect_audit_log_stmt;
+        DELETE FROM audit_log_db WHERE id < (current_log_id - row_limit);
+        ALTER TABLE audit_log_db ENABLE TRIGGER trg_protect_audit_log_row;
+        ALTER TABLE audit_log_db ENABLE TRIGGER trg_protect_audit_log_stmt;
+    END IF;
+
+    IF (TG_OP = 'DELETE') THEN
+        RETURN OLD;
+    ELSE
+        RETURN NEW;
+    END IF;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- 4. SEOME TRIGGERID KÕIKIDE HETKEL OLEVATE TABELITEGA (NB! uute tabelite lisandumisel uuesti jooksutada seda osa)
+DO $$
+DECLARE
+    r RECORD;
+BEGIN
+    FOR r IN 
+        SELECT c.relname AS table_name
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' 
+          AND c.relkind IN ('r', 'p') 
+          AND c.relispartition = false 
+          AND c.relname NOT IN ('audit_log_db')
+    LOOP
+        -- Kustutame vana triggeri konkreetse tabeli küljest (kui see on olemas)
+        EXECUTE format('DROP TRIGGER IF EXISTS trg_audit_dml ON public.%I;', r.table_name);
+
+        -- Loome puhta ja töötava triggeri
+        EXECUTE format('
+            CREATE TRIGGER trg_audit_dml
+            AFTER INSERT OR UPDATE OR DELETE ON public.%I
+            FOR EACH ROW EXECUTE FUNCTION process_audit_log_db();', r.table_name);
+    END LOOP;
+END $$;
+
+
+
+
+
+NB! Kui on soov logikirjete limiiti 10 000 000 pealt muuta suuremaks, siis muuta väärtust row_limit juures. Kui 10 miljonit täis saab hakkab kõige vanemaid
+logisid otsast üle kirjutama.
+
+
+
+Kui tekib mõnest tabelist liiga palju mõttetuid (ummistavaid) logisid, siis saab root või tabeli omanik triggeri droppida:
+
+DROP TRIGGER IF EXISTS trg_audit_dml ON sinu_tabeli_nimi;
+
+
+Saab ka triggeri määramises välistada tabeleid:
+
+    FOR r IN 
+        SELECT c.relname AS table_name
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' 
+          AND c.relkind IN ('r', 'p') 
+          AND c.relispartition = false 
+          -- VÄLISTAME LOGITABELI JA MUUD MÕTTETUD TABELID SIIN:
+          AND c.relname NOT IN ('audit_log_db', 'tabel_2', 'tabel_3')
+    LOOP
+
+
+
+Kui tahad lisatud triggerid ja funktsioonid maha võtta (kustutada), siis jooksuta (audit_log_db tabeli saab droppida ainult postgre root (juur) kasutajana):
+
+DO $$
+DECLARE
+    r RECORD;
+BEGIN
+    FOR r IN 
+        SELECT c.relname AS table_name
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' 
+          AND c.relkind IN ('r', 'p') 
+          AND c.relispartition = false 
+          AND c.relname <> 'audit_log_db'
+    LOOP
+        EXECUTE format('DROP TRIGGER IF EXISTS trg_audit_dml ON %I;', r.table_name);
+    END LOOP;
+END $$;
+
+DROP FUNCTION IF EXISTS process_audit_log_db() CASCADE;
+DROP FUNCTION IF EXISTS protect_audit_log_db() CASCADE;
+
+
+
+
+Kui on soov mõned kasutajad logidest välistada:
+
+  --SIIA VAHELE punktis 3 funktsioonis. IF (TG_TABLE_NAME = 'audit_log_db') THEN RETURN NULL; END IF;
+
+    -- Välistame kindlad kasutajad:
+    IF session_user IN ('välistatud_kasutaja_1', 'välistatud_kasutaja_2') THEN
+        IF (TG_OP = 'DELETE') THEN
+            RETURN OLD;
+        ELSE
+            RETURN NEW;
+        END IF;
+    END IF;
+  --SIIA VAHELE IF (TG_OP = 'DELETE') THEN old_row := to_jsonb(OLD);
