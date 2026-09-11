@@ -1,0 +1,565 @@
+// This Pine Script™ source code is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+// © Ultimate Multi-Indicator Strategy v3.0
+
+//@version=5
+strategy("Ultimate Buy/Sell Strategy", overlay=true, default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100, initial_capital=10000, commission_type=strategy.commission.percent,
+     commission_value=0.1, slippage=1, pyramiding=0, calc_on_every_tick=false,
+     max_bars_back=5000)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░░  INPUT SETTINGS  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- Signal Thresholds ---
+grp_sig = "═══ Signal Settings ═══"
+buyThreshold  = input.float(0.55, "Buy Threshold (Composite Score)", minval=0.1, maxval=1.0, step=0.05, group=grp_sig, tooltip="Minimum composite score to trigger a BUY signal. Higher = fewer but more reliable signals.")
+sellThreshold = input.float(-0.55, "Sell Threshold (Composite Score)", minval=-1.0, maxval=-0.1, step=0.05, group=grp_sig, tooltip="Maximum composite score to trigger a SELL signal. Lower = fewer but more reliable signals.")
+cooldownBars  = input.int(5, "Signal Cooldown (bars)", minval=1, maxval=50, group=grp_sig, tooltip="Minimum bars between signals to avoid noise.")
+
+// --- Trend Settings ---
+grp_trend = "═══ Trend Indicators ═══"
+emaFast    = input.int(21, "EMA Fast", minval=5, maxval=50, group=grp_trend)
+emaMid     = input.int(50, "EMA Mid", minval=20, maxval=100, group=grp_trend)
+emaSlow    = input.int(200, "EMA Slow", minval=100, maxval=400, group=grp_trend)
+adxLen     = input.int(14, "ADX Length", minval=7, maxval=30, group=grp_trend)
+adxThresh  = input.int(20, "ADX Trend Threshold", minval=10, maxval=40, group=grp_trend)
+stFactor   = input.float(3.0, "Supertrend Factor", minval=1.0, maxval=5.0, step=0.5, group=grp_trend)
+stPeriod   = input.int(10, "Supertrend ATR Period", minval=5, maxval=20, group=grp_trend)
+
+// --- Momentum Settings ---
+grp_mom = "═══ Momentum Indicators ═══"
+rsiLen      = input.int(14, "RSI Length", minval=7, maxval=30, group=grp_mom)
+rsiOB       = input.int(65, "RSI Overbought", minval=60, maxval=85, group=grp_mom)
+rsiOS       = input.int(35, "RSI Oversold", minval=15, maxval=40, group=grp_mom)
+macdFast    = input.int(12, "MACD Fast", minval=5, maxval=20, group=grp_mom)
+macdSlow    = input.int(26, "MACD Slow", minval=15, maxval=40, group=grp_mom)
+macdSignal  = input.int(9, "MACD Signal", minval=5, maxval=15, group=grp_mom)
+stochLen    = input.int(14, "Stochastic RSI Length", minval=7, maxval=21, group=grp_mom)
+stochSmK    = input.int(3, "Stoch RSI Smooth K", minval=1, maxval=5, group=grp_mom)
+stochSmD    = input.int(3, "Stoch RSI Smooth D", minval=1, maxval=5, group=grp_mom)
+
+// --- Volatility Settings ---
+grp_vol = "═══ Volatility Indicators ═══"
+bbLen    = input.int(20, "Bollinger Bands Length", minval=10, maxval=50, group=grp_vol)
+bbMult   = input.float(2.0, "Bollinger Bands Mult", minval=1.0, maxval=3.0, step=0.5, group=grp_vol)
+atrLen   = input.int(14, "ATR Length", minval=7, maxval=30, group=grp_vol)
+kcLen    = input.int(20, "Keltner Channel Length", minval=10, maxval=50, group=grp_vol)
+kcMult   = input.float(1.5, "Keltner Channel Mult", minval=1.0, maxval=3.0, step=0.5, group=grp_vol)
+
+// --- Volume Settings ---
+grp_volu = "═══ Volume Indicators ═══"
+volSmaLen   = input.int(20, "Volume SMA Length", minval=10, maxval=50, group=grp_volu)
+volSpikeMul = input.float(2.0, "Volume Spike Multiplier", minval=1.5, maxval=4.0, step=0.5, group=grp_volu)
+
+// --- Market Context ---
+grp_mkt = "═══ Market Context ═══"
+useMarketCtx = input.bool(true, "Use S&P 500 / VIX Context", group=grp_mkt, tooltip="Enable/disable market context analysis using SPX and VIX.")
+spxSymbol    = input.symbol("SPX", "S&P 500 Symbol", group=grp_mkt)
+vixSymbol    = input.symbol("VIX", "VIX Symbol", group=grp_mkt)
+nasdaqSymbol = input.symbol("QQQ", "Nasdaq / QQQ Symbol", group=grp_mkt)
+
+// --- Multi-Timeframe ---
+grp_mtf = "═══ Multi-Timeframe ═══"
+useMTF     = input.bool(true, "Use Multi-Timeframe Confirmation", group=grp_mtf)
+htfAutoRes  = input.bool(true, "Auto-detect Higher TF", group=grp_mtf, tooltip="Automatically selects a higher timeframe based on current chart.")
+
+// --- Risk Management ---
+grp_risk = "═══ Risk Management ═══"
+useStopLoss  = input.bool(true, "Use ATR Stop-Loss", group=grp_risk)
+slAtrMult    = input.float(1.5, "Stop-Loss ATR Multiplier", minval=0.5, maxval=5.0, step=0.5, group=grp_risk)
+tpAtrMult    = input.float(3.0, "Take-Profit ATR Multiplier", minval=1.0, maxval=10.0, step=0.5, group=grp_risk)
+useTrailing  = input.bool(true, "Use Trailing Stop", group=grp_risk)
+trailAtrMult = input.float(2.0, "Trailing Stop ATR Mult", minval=0.5, maxval=5.0, step=0.5, group=grp_risk)
+
+// --- Visual Settings ---
+grp_vis = "═══ Visual Settings ═══"
+showBB     = input.bool(true, "Show Bollinger Bands", group=grp_vis)
+showEMAs   = input.bool(true, "Show EMA Lines", group=grp_vis)
+showVWAP   = input.bool(true, "Show VWAP", group=grp_vis)
+showST     = input.bool(true, "Show Supertrend", group=grp_vis)
+showTable  = input.bool(true, "Show Info Table", group=grp_vis)
+showScore  = input.bool(true, "Show Score Labels", group=grp_vis)
+
+// --- Weights ---
+grp_w = "═══ Category Weights ═══"
+wTrend   = input.float(0.30, "Trend Weight", minval=0.0, maxval=1.0, step=0.05, group=grp_w)
+wMom     = input.float(0.25, "Momentum Weight", minval=0.0, maxval=1.0, step=0.05, group=grp_w)
+wVol     = input.float(0.10, "Volatility Weight", minval=0.0, maxval=1.0, step=0.05, group=grp_w)
+wVolume  = input.float(0.15, "Volume Weight", minval=0.0, maxval=1.0, step=0.05, group=grp_w)
+wMarket  = input.float(0.10, "Market Context Weight", minval=0.0, maxval=1.0, step=0.05, group=grp_w)
+wMTF     = input.float(0.10, "Multi-TF Weight", minval=0.0, maxval=1.0, step=0.05, group=grp_w)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░░  HELPER FUNCTIONS  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Normalize value to range [-1, 1]
+normalize(float val, float minV, float maxV) =>
+    math.max(-1.0, math.min(1.0, (val - (minV + maxV) / 2) / ((maxV - minV) / 2)))
+
+// Auto Higher Timeframe Resolution
+getHTF() =>
+    if timeframe.isseconds or (timeframe.isintraday and timeframe.multiplier <= 5)
+        "60"
+    else if timeframe.isintraday and timeframe.multiplier <= 15
+        "240"
+    else if timeframe.isintraday and timeframe.multiplier <= 60
+        "D"
+    else if timeframe.isintraday
+        "W"
+    else if timeframe.isdaily
+        "W"
+    else if timeframe.isweekly
+        "M"
+    else
+        "M"
+
+htfRes = getHTF()
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░░  1. TREND INDICATORS  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- EMA ---
+ema21  = ta.ema(close, emaFast)
+ema50  = ta.ema(close, emaMid)
+ema200 = ta.ema(close, emaSlow)
+
+emaScore = 0.0
+emaScore := close > ema200 ? emaScore + 0.35 : emaScore - 0.35
+emaScore := close > ema50  ? emaScore + 0.35 : emaScore - 0.35
+emaScore := ema21 > ema50  ? emaScore + 0.30 : emaScore - 0.30
+emaScore := math.max(-1.0, math.min(1.0, emaScore))
+
+// --- ADX / DMI ---
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+adxScore = 0.0
+trendStrength = adxVal > adxThresh
+adxScore := trendStrength ? (diPlus > diMinus ? 1.0 : -1.0) : 0.0
+
+// --- Supertrend ---
+[stLine, stDir] = ta.supertrend(stFactor, stPeriod)
+stScore = stDir == -1 ? 1.0 : -1.0
+
+// --- Ichimoku Cloud ---
+tenkan  = (ta.highest(high, 9) + ta.lowest(low, 9)) / 2
+kijun   = (ta.highest(high, 26) + ta.lowest(low, 26)) / 2
+senkouA = (tenkan + kijun) / 2
+senkouB = (ta.highest(high, 52) + ta.lowest(low, 52)) / 2
+cloudTop = math.max(senkouA[26], senkouB[26])
+cloudBot = math.min(senkouA[26], senkouB[26])
+
+ichiScore = 0.0
+ichiScore := close > cloudTop ? 0.5 : close < cloudBot ? -0.5 : 0.0
+ichiScore := tenkan > kijun ? ichiScore + 0.25 : ichiScore - 0.25
+ichiScore := close > tenkan ? ichiScore + 0.25 : ichiScore - 0.25
+ichiScore := math.max(-1.0, math.min(1.0, ichiScore))
+
+// --- Combined Trend Score ---
+trendScore = (emaScore * 0.30 + adxScore * 0.25 + stScore * 0.20 + ichiScore * 0.25)
+trendScore := math.max(-1.0, math.min(1.0, trendScore))
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░░  2. MOMENTUM INDICATORS  ░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- RSI ---
+rsiVal = ta.rsi(close, rsiLen)
+rsiRising = rsiVal > rsiVal[1]
+rsiFalling = rsiVal < rsiVal[1]
+
+rsiScore = 0.0
+if rsiVal < rsiOS and rsiRising
+    rsiScore := 1.0
+else if rsiVal < rsiOS
+    rsiScore := 0.5
+else if rsiVal > rsiOB and rsiFalling
+    rsiScore := -1.0
+else if rsiVal > rsiOB
+    rsiScore := -0.5
+else
+    rsiScore := normalize(50 - rsiVal, -50, 50) * -1
+
+// --- MACD ---
+[macdLine, signalLine, histLine] = ta.macd(close, macdFast, macdSlow, macdSignal)
+
+macdScore = 0.0
+macdCrossUp   = ta.crossover(macdLine, signalLine)
+macdCrossDown = ta.crossunder(macdLine, signalLine)
+histRising    = histLine > histLine[1]
+histFalling   = histLine < histLine[1]
+
+if macdCrossUp
+    macdScore := 1.0
+else if macdCrossDown
+    macdScore := -1.0
+else if macdLine > signalLine and histRising
+    macdScore := 0.7
+else if macdLine > signalLine
+    macdScore := 0.3
+else if macdLine < signalLine and histFalling
+    macdScore := -0.7
+else
+    macdScore := -0.3
+
+// Above/below zero line bonus
+macdScore := macdLine > 0 ? macdScore + 0.15 : macdScore - 0.15
+macdScore := math.max(-1.0, math.min(1.0, macdScore))
+
+// --- Stochastic RSI ---
+rsi1        = ta.rsi(close, stochLen)
+stochK_raw  = ta.stoch(rsi1, rsi1, rsi1, stochLen)
+stochK      = ta.sma(stochK_raw, stochSmK)
+stochD      = ta.sma(stochK, stochSmD)
+
+stochScore = 0.0
+if stochK < 20 and stochK > stochD
+    stochScore := 1.0
+else if stochK < 20
+    stochScore := 0.5
+else if stochK > 80 and stochK < stochD
+    stochScore := -1.0
+else if stochK > 80
+    stochScore := -0.5
+else
+    stochScore := stochK > stochD ? 0.3 : -0.3
+
+// --- Combined Momentum Score ---
+momScore = (rsiScore * 0.35 + macdScore * 0.40 + stochScore * 0.25)
+momScore := math.max(-1.0, math.min(1.0, momScore))
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░░  3. VOLATILITY INDICATORS  ░░░░░░░░░░░░░░░░░░░░░░░░░
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- Bollinger Bands ---
+bbBasis = ta.sma(close, bbLen)
+bbDev   = bbMult * ta.stdev(close, bbLen)
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+bbWidth = (bbUpper - bbLower) / bbBasis * 100
+
+bbScore = 0.0
+if close <= bbLower
+    bbScore := 1.0   // At lower band = potential buy
+else if close >= bbUpper
+    bbScore := -1.0  // At upper band = potential sell
+else
+    bbScore := normalize(bbBasis - close, -(bbUpper - bbBasis), bbUpper - bbBasis) * -1
+
+// --- Keltner Channel (for Squeeze detection) ---
+kcBasis = ta.ema(close, kcLen)
+kcRange = ta.atr(kcLen) * kcMult
+kcUpper = kcBasis + kcRange
+kcLower = kcBasis - kcRange
+
+// Squeeze: BB inside KC
+sqzOn  = bbLower > kcLower and bbUpper < kcUpper
+sqzOff = bbLower < kcLower or bbUpper > kcUpper
+
+// --- ATR ---
+atrVal = ta.atr(atrLen)
+
+// --- Combined Volatility Score ---
+volScore = bbScore
+// Squeeze release amplifies the signal
+if sqzOff and sqzOn[1]
+    volScore := close > bbBasis ? math.min(1.0, volScore + 0.3) : math.max(-1.0, volScore - 0.3)
+volScore := math.max(-1.0, math.min(1.0, volScore))
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░░  4. VOLUME INDICATORS  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- Volume SMA ---
+volSma   = ta.sma(volume, volSmaLen)
+volAbove = volume > volSma
+volSpike = volume > volSma * volSpikeMul
+
+// --- OBV ---
+obvVal     = ta.obv
+obvEma     = ta.ema(obvVal, 21)
+obvRising  = obvVal > obvEma
+obvFalling = obvVal < obvEma
+
+// --- VWAP ---
+vwapVal    = ta.vwap(hlc3)
+priceAboveVwap = close > vwapVal
+
+// --- Combined Volume Score ---
+volumeScore = 0.0
+
+// Volume confirms direction
+if volAbove
+    volumeScore := close > close[1] ? 0.3 : -0.3
+else
+    volumeScore := 0.0
+
+// OBV trend
+volumeScore := obvRising ? volumeScore + 0.3 : volumeScore - 0.3
+
+// VWAP position
+volumeScore := priceAboveVwap ? volumeScore + 0.2 : volumeScore - 0.2
+
+// Volume spike bonus
+if volSpike
+    volumeScore := close > close[1] ? volumeScore + 0.2 : volumeScore - 0.2
+
+volumeScore := math.max(-1.0, math.min(1.0, volumeScore))
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░░  5. MARKET CONTEXT  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- S&P 500 ---
+spxClose = request.security(spxSymbol, timeframe.period, close, lookahead=barmerge.lookahead_off)
+spxEma50 = request.security(spxSymbol, timeframe.period, ta.ema(close, 50), lookahead=barmerge.lookahead_off)
+spxEma21 = request.security(spxSymbol, timeframe.period, ta.ema(close, 21), lookahead=barmerge.lookahead_off)
+
+spxBullish = spxClose > spxEma50 and spxEma21 > spxEma50
+
+// --- VIX ---
+vixClose = request.security(vixSymbol, timeframe.period, close, lookahead=barmerge.lookahead_off)
+vixHigh  = vixClose > 30
+vixLow   = vixClose < 20
+
+// --- Nasdaq ---
+nasdaqClose = request.security(nasdaqSymbol, timeframe.period, close, lookahead=barmerge.lookahead_off)
+nasdaqEma50 = request.security(nasdaqSymbol, timeframe.period, ta.ema(close, 50), lookahead=barmerge.lookahead_off)
+nasdaqBullish = nasdaqClose > nasdaqEma50
+
+// --- Combined Market Score ---
+marketScore = 0.0
+if useMarketCtx
+    // SPX contribution
+    marketScore := spxBullish ? marketScore + 0.4 : marketScore - 0.4
+    // VIX contribution (inverse)
+    marketScore := vixHigh ? marketScore - 0.3 : vixLow ? marketScore + 0.3 : marketScore
+    // Nasdaq contribution
+    marketScore := nasdaqBullish ? marketScore + 0.3 : marketScore - 0.3
+    marketScore := math.max(-1.0, math.min(1.0, marketScore))
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░░  6. MULTI-TIMEFRAME  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- Higher TF EMA alignment ---
+htfEma21 = request.security(syminfo.tickerid, htfRes, ta.ema(close, 21), lookahead=barmerge.lookahead_off)
+htfEma50 = request.security(syminfo.tickerid, htfRes, ta.ema(close, 50), lookahead=barmerge.lookahead_off)
+htfClose = request.security(syminfo.tickerid, htfRes, close, lookahead=barmerge.lookahead_off)
+htfRsi   = request.security(syminfo.tickerid, htfRes, ta.rsi(close, 14), lookahead=barmerge.lookahead_off)
+
+// --- Higher TF MACD ---
+htfMacdLine = request.security(syminfo.tickerid, htfRes, ta.ema(close, macdFast) - ta.ema(close, macdSlow), lookahead=barmerge.lookahead_off)
+htfMacdSig  = request.security(syminfo.tickerid, htfRes, ta.ema(ta.ema(close, macdFast) - ta.ema(close, macdSlow), macdSignal), lookahead=barmerge.lookahead_off)
+
+// --- Combined MTF Score ---
+mtfScore = 0.0
+if useMTF
+    // EMA alignment on HTF
+    mtfScore := htfClose > htfEma50 ? mtfScore + 0.35 : mtfScore - 0.35
+    mtfScore := htfEma21 > htfEma50 ? mtfScore + 0.25 : mtfScore - 0.25
+    // RSI on HTF
+    mtfScore := htfRsi > 50 ? mtfScore + 0.15 : mtfScore - 0.15
+    // MACD on HTF
+    mtfScore := htfMacdLine > htfMacdSig ? mtfScore + 0.25 : mtfScore - 0.25
+    mtfScore := math.max(-1.0, math.min(1.0, mtfScore))
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░░  7. COMPOSITE SCORE  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// ══════════════════════════════════════════════════════════════════════════════
+
+totalWeight = wTrend + wMom + wVol + wVolume + (useMarketCtx ? wMarket : 0) + (useMTF ? wMTF : 0)
+
+compositeScore = (trendScore * wTrend +
+                  momScore * wMom +
+                  volScore * wVol +
+                  volumeScore * wVolume +
+                  (useMarketCtx ? marketScore * wMarket : 0) +
+                  (useMTF ? mtfScore * wMTF : 0)) / totalWeight
+
+compositeScore := math.max(-1.0, math.min(1.0, compositeScore))
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░░  8. SIGNAL GENERATION  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Cooldown mechanism
+var int lastSignalBar = 0
+barsSinceSignal = bar_index - lastSignalBar
+
+// Confirmation filters
+volumeConfirm = volAbove
+trendAligned   = (trendScore > 0 and momScore > 0) or (trendScore < 0 and momScore < 0)
+
+// **** SIGNAL CONDITIONS ****
+buySignal  = compositeScore >= buyThreshold and barsSinceSignal >= cooldownBars and volumeConfirm and trendAligned
+sellSignal = compositeScore <= sellThreshold and barsSinceSignal >= cooldownBars and volumeConfirm and trendAligned
+
+// Track signal bars
+if buySignal or sellSignal
+    lastSignalBar := bar_index
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░░  9. STRATEGY EXECUTION  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// ══════════════════════════════════════════════════════════════════════════════
+
+atrSL = atrVal * slAtrMult
+atrTP = atrVal * tpAtrMult
+
+if buySignal
+    strategy.entry("BUY", strategy.long)
+    if useStopLoss
+        strategy.exit("BUY Exit", "BUY",
+             stop=close - atrSL,
+             limit=close + atrTP,
+             trail_points=useTrailing ? atrVal * trailAtrMult / syminfo.mintick : na,
+             trail_offset=useTrailing ? atrVal * 1.0 / syminfo.mintick : na)
+
+if sellSignal
+    strategy.entry("SELL", strategy.short)
+    if useStopLoss
+        strategy.exit("SELL Exit", "SELL",
+             stop=close + atrSL,
+             limit=close - atrTP,
+             trail_points=useTrailing ? atrVal * trailAtrMult / syminfo.mintick : na,
+             trail_offset=useTrailing ? atrVal * 1.0 / syminfo.mintick : na)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░░  10. VISUAL OVERLAYS  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- EMA Lines ---
+plot(showEMAs ? ema21 : na, "EMA 21", color=color.new(#26a69a, 30), linewidth=1)
+plot(showEMAs ? ema50 : na, "EMA 50", color=color.new(#42a5f5, 30), linewidth=1)
+plot(showEMAs ? ema200 : na, "EMA 200", color=color.new(#ef5350, 30), linewidth=2)
+
+// --- Bollinger Bands ---
+bbUpperPlot = plot(showBB ? bbUpper : na, "BB Upper", color=color.new(#7e57c2, 60))
+bbLowerPlot = plot(showBB ? bbLower : na, "BB Lower", color=color.new(#7e57c2, 60))
+plot(showBB ? bbBasis : na, "BB Basis", color=color.new(#7e57c2, 80), linewidth=1)
+fill(bbUpperPlot, bbLowerPlot, color=color.new(#7e57c2, 92), title="BB Fill")
+
+// --- VWAP ---
+plot(showVWAP ? vwapVal : na, "VWAP", color=color.new(#ff9800, 30), linewidth=2, style=plot.style_stepline)
+
+// --- Supertrend ---
+stColor = stDir == -1 ? color.new(#26a69a, 20) : color.new(#ef5350, 20)
+plot(showST ? stLine : na, "Supertrend", color=stColor, linewidth=2, style=plot.style_linebr)
+
+// --- Buy/Sell Signals ---
+plotshape(buySignal, "BUY Signal", shape.labelup, location.belowbar,
+     color=color.new(#00c853, 0), size=size.normal, text="BUY",
+     textcolor=color.white)
+
+plotshape(sellSignal, "SELL Signal", shape.labeldown, location.abovebar,
+     color=color.new(#ff1744, 0), size=size.normal, text="SELL",
+     textcolor=color.white)
+
+// --- Score Label ---
+if showScore and (buySignal or sellSignal)
+    scoreText = "Score: " + str.tostring(compositeScore, "#.##") +
+         "\nTrend: " + str.tostring(trendScore, "#.##") +
+         "\nMom: " + str.tostring(momScore, "#.##") +
+         "\nVol: " + str.tostring(volumeScore, "#.##")
+    labelColor = buySignal ? color.new(#00c853, 10) : color.new(#ff1744, 10)
+    labelYPos  = buySignal ? low - atrVal * 2 : high + atrVal * 2
+    label.new(bar_index, labelYPos, scoreText,
+         color=labelColor, textcolor=color.white,
+         style=buySignal ? label.style_label_up : label.style_label_down,
+         size=size.small)
+
+// --- Background color for strong signals ---
+bgcolor(compositeScore >= buyThreshold * 0.8 ? color.new(#00c853, 95) : na, title="Bullish Zone BG")
+bgcolor(compositeScore <= sellThreshold * 0.8 ? color.new(#ff1744, 95) : na, title="Bearish Zone BG")
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░░  11. INFORMATION TABLE  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Helper functions must be defined at top level (Pine Script restriction)
+scoreColor(float sc) =>
+    sc >= 0.5  ? color.new(#00c853, 0) :
+     sc >= 0.2  ? color.new(#69f0ae, 0) :
+     sc >= -0.2 ? color.new(#ffd54f, 0) :
+     sc >= -0.5 ? color.new(#ff8a65, 0) :
+     color.new(#ff1744, 0)
+
+var table infoTable = table.new(position.top_right, 2, 14,
+     bgcolor=color.new(#1e1e1e, 5),
+     border_color=color.new(#333333, 0),
+     border_width=1,
+     frame_color=color.new(#333333, 0),
+     frame_width=2)
+
+if showTable and barstate.islast
+    headerBg = color.new(#0d47a1, 0)
+    headerFg = color.white
+
+    table.cell(infoTable, 0, 0, "INDICATOR", text_color=headerFg, bgcolor=headerBg, text_size=size.small)
+    table.cell(infoTable, 1, 0, "SCORE", text_color=headerFg, bgcolor=headerBg, text_size=size.small)
+
+    // Row data
+    table.cell(infoTable, 0, 1, "EMA", text_color=color.white, bgcolor=color.new(#2d2d2d, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(infoTable, 1, 1, str.tostring(emaScore, "#.##"), text_color=scoreColor(emaScore), bgcolor=color.new(#2d2d2d, 0), text_size=size.small)
+    table.cell(infoTable, 0, 2, "ADX/DMI", text_color=color.white, bgcolor=color.new(#2d2d2d, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(infoTable, 1, 2, str.tostring(adxScore, "#.##"), text_color=scoreColor(adxScore), bgcolor=color.new(#2d2d2d, 0), text_size=size.small)
+    table.cell(infoTable, 0, 3, "Supertrend", text_color=color.white, bgcolor=color.new(#2d2d2d, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(infoTable, 1, 3, str.tostring(stScore, "#.##"), text_color=scoreColor(stScore), bgcolor=color.new(#2d2d2d, 0), text_size=size.small)
+    table.cell(infoTable, 0, 4, "Ichimoku", text_color=color.white, bgcolor=color.new(#2d2d2d, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(infoTable, 1, 4, str.tostring(ichiScore, "#.##"), text_color=scoreColor(ichiScore), bgcolor=color.new(#2d2d2d, 0), text_size=size.small)
+    table.cell(infoTable, 0, 5, "RSI", text_color=color.white, bgcolor=color.new(#2d2d2d, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(infoTable, 1, 5, str.tostring(rsiScore, "#.##"), text_color=scoreColor(rsiScore), bgcolor=color.new(#2d2d2d, 0), text_size=size.small)
+    table.cell(infoTable, 0, 6, "MACD", text_color=color.white, bgcolor=color.new(#2d2d2d, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(infoTable, 1, 6, str.tostring(macdScore, "#.##"), text_color=scoreColor(macdScore), bgcolor=color.new(#2d2d2d, 0), text_size=size.small)
+    table.cell(infoTable, 0, 7, "StochRSI", text_color=color.white, bgcolor=color.new(#2d2d2d, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(infoTable, 1, 7, str.tostring(stochScore, "#.##"), text_color=scoreColor(stochScore), bgcolor=color.new(#2d2d2d, 0), text_size=size.small)
+    table.cell(infoTable, 0, 8, "Bollinger", text_color=color.white, bgcolor=color.new(#2d2d2d, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(infoTable, 1, 8, str.tostring(bbScore, "#.##"), text_color=scoreColor(bbScore), bgcolor=color.new(#2d2d2d, 0), text_size=size.small)
+    table.cell(infoTable, 0, 9, "Volume", text_color=color.white, bgcolor=color.new(#2d2d2d, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(infoTable, 1, 9, str.tostring(volumeScore, "#.##"), text_color=scoreColor(volumeScore), bgcolor=color.new(#2d2d2d, 0), text_size=size.small)
+    mktSc = useMarketCtx ? marketScore : 0.0
+    table.cell(infoTable, 0, 10, "Market", text_color=color.white, bgcolor=color.new(#2d2d2d, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(infoTable, 1, 10, str.tostring(mktSc, "#.##"), text_color=scoreColor(mktSc), bgcolor=color.new(#2d2d2d, 0), text_size=size.small)
+    mtfSc = useMTF ? mtfScore : 0.0
+    table.cell(infoTable, 0, 11, "Multi-TF", text_color=color.white, bgcolor=color.new(#2d2d2d, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(infoTable, 1, 11, str.tostring(mtfSc, "#.##"), text_color=scoreColor(mtfSc), bgcolor=color.new(#2d2d2d, 0), text_size=size.small)
+
+    // Separator
+    table.cell(infoTable, 0, 12, "----------", text_color=color.gray, bgcolor=color.new(#1e1e1e, 0), text_size=size.small)
+    table.cell(infoTable, 1, 12, "------", text_color=color.gray, bgcolor=color.new(#1e1e1e, 0), text_size=size.small)
+
+    // Composite
+    compBg = compositeScore >= buyThreshold ? color.new(#00c853, 0) :
+             compositeScore <= sellThreshold ? color.new(#ff1744, 0) :
+             color.new(#ffd54f, 0)
+    table.cell(infoTable, 0, 13, "COMPOSITE", text_color=color.white, bgcolor=compBg, text_size=size.small, text_halign=text.align_left)
+    table.cell(infoTable, 1, 13, str.tostring(compositeScore, "#.###"), text_color=color.white, bgcolor=compBg, text_size=size.small)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░░  12. ALERTS  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// ══════════════════════════════════════════════════════════════════════════════
+
+alertcondition(buySignal, title="🟢 BUY Signal", message="BUY Signal! Composite Score: {{plot_0}} | {{ticker}} @ {{close}}")
+alertcondition(sellSignal, title="🔴 SELL Signal", message="SELL Signal! Composite Score: {{plot_0}} | {{ticker}} @ {{close}}")
+alertcondition(compositeScore >= buyThreshold * 0.8, title="⚠️ Approaching BUY", message="Approaching BUY zone | {{ticker}} Score rising")
+alertcondition(compositeScore <= sellThreshold * 0.8, title="⚠️ Approaching SELL", message="Approaching SELL zone | {{ticker}} Score falling")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░  END OF SCRIPT  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// ══════════════════════════════════════════════════════════════════════════════
