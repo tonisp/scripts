@@ -128,6 +128,12 @@ grp_mtf = "═══ Multi-Timeframe (Non-Repainting) ═══"
 useMTF      = input.bool(true, "Enable Multi-Timeframe Confirmation", group=grp_mtf, tooltip="When enabled, adds up to +0.15 score if higher timeframe is aligned with the signal. Improves accuracy across different tickers.")
 htfAutoRes  = input.bool(true, "Auto-detect Higher TF", group=grp_mtf, tooltip="Automatically selects a higher timeframe based on current chart.")
 
+// --- Fibonacci Support/Resistance ---
+grp_fib = "═══ Fibonacci Structural Filter ═══"
+useFibFilter = input.bool(false, "Use Fibonacci Support Filter (Discount Zone)", group=grp_fib, tooltip="Only allows Early Reversal BUY signals if price is in the Discount Zone (below 0.500 Fib) and SELL signals in Premium Zone. Prevents catching falling knives mid-trend.")
+showFibs     = input.bool(false, "Show Fibonacci Levels on Chart", group=grp_fib)
+baseFibLookback = input.int(200, "Base Fibonacci Lookback (bars)", group=grp_fib, tooltip="How many bars to look back. Auto-adapts if Auto-Adapt is enabled.")
+
 // --- Session Filter ---
 grp_sess = "═══ Trading Session Filter ═══"
 useSessionFilter = input.bool(false, "Filter Trading Hours", group=grp_sess, tooltip="Only trigger signals during specified market session.")
@@ -230,7 +236,7 @@ isChoppy   = useChopFilter and (chopVal >= chopThresh)
 
 
 // ══════════════════════════════════════════════════════════════════════════════
-// ░░░░░░░░░░░░░░░░░░░░░  1. TREND INDICATORS  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// ░░░░░░░░░░░░░░░░░░░░░░░  1. TREND & CHOP FILTERS  ░░░░░░░░░░░░░░░░░░░░░░░░░░
 // ══════════════════════════════════════════════════════════════════════════════
 
 // --- Golden & Death Cross Benchmark (TradingAgents 50 vs 200) ---
@@ -423,9 +429,9 @@ if not na(ph)
 
 var int lastBullDivBar = 0
 var int lastBearDivBar = 0
-if bullishDiv or hiddenBullDiv
+if bullishDiv
     lastBullDivBar := bar_index
-if bearishDiv or hiddenBearDiv
+if bearishDiv
     lastBearDivBar := bar_index
 
 bullDivActive = (bar_index - lastBullDivBar) <= 6
@@ -731,6 +737,10 @@ effCooldown      = useAutoAdaptiveTF ? (is1hPlus ? 5 : is15m ? 3 : 5) : cooldown
 // Chop Threshold Adaptation
 effChopThresh    = useAutoAdaptiveTF ? (is15m ? 58.0 : is1hPlus ? 58.0 : 60.0) : chopThresh
 
+// Fibonacci Lookback Adaptation (scales with timeframe)
+// 1m: 390 (1 day), 5m: 200 (2.5 days), 15m: 150 (4 days), 30m: 120 (1 week), 1h: 100
+effFibLookback   = useAutoAdaptiveTF ? (is1m ? 390 : is5m ? 200 : is15m ? 150 : is30m ? 120 : 100) : baseFibLookback
+
 // Risk Management Adaptation (SL/TP/BE — proven profitable per TF)
 effSlMult    = useAutoAdaptiveTF ? (is1m ? 2.5 : is5m ? 1.5 : is15m ? 2.5 : is30m ? 2.5 : 1.5) : slAtrMult
 effTpMult    = useAutoAdaptiveTF ? (is1m ? 3.0 : is5m ? 2.5 : is15m ? 2.5 : is30m ? 1.5 : 3.0) : tpAtrMult
@@ -766,20 +776,33 @@ crossOpenUp    = ta.crossover(close, open)
 crossOpenDown  = ta.crossunder(close, open)
 crossStochUp   = ta.crossover(stochK, stochD)
 crossStochDown = ta.crossunder(stochK, stochD)
+// --- Fibonacci Calculations (Dynamic Lookback) ---
+macroHigh = ta.highest(high, effFibLookback)
+macroLow  = ta.lowest(low, effFibLookback)
+fibRange  = macroHigh - macroLow
+fib236    = macroHigh - fibRange * 0.236
+fib382    = macroHigh - fibRange * 0.382
+fib500    = macroHigh - fibRange * 0.500
+fib618    = macroHigh - fibRange * 0.618
+fib786    = macroHigh - fibRange * 0.786
+
+fibFilterBuy  = useFibFilter ? (close <= fib500) : true
+fibFilterSell = useFibFilter ? (close >= fib500) : true
 
 // --- Early Reversal Signals (Point 2 B - Ideal for 1m / 5m / 15m Scalping) ---
 earlyDivTriggerBuy    = useDivTrigger and (bullishDiv or (bullDivActive and crossEma21Up))
 earlySqzTriggerBuy    = useSqzFireTrigger and (sqzFiredUp or (sqzBearDecel and crossOpenUp))
 earlyStochTriggerBuy  = useStochTrigger and (crossStochUp and stochK < 40)
 earlyBuyCondition     = earlyDivTriggerBuy or earlySqzTriggerBuy or earlyStochTriggerBuy
-earlyBuySafety        = (not requireEma50Early or close > ema50) and regimeAllowed and notContradictBuy and inSession and (close >= open or close > close[1]) and rsiFilterBuy
+earlyBuySafety        = (not requireEma50Early or close > ema50) and regimeAllowed and notContradictBuy and inSession and (close >= open or close > close[1]) and rsiFilterBuy and fibFilterBuy
 earlyBuySignal        = effEarlyReversal and earlyBuyCondition and earlyBuySafety and compositeScore >= effEarlyThresh and barsSinceSignal >= effCooldown
 
 earlyDivTriggerSell   = useDivTrigger and (bearishDiv or (bearDivActive and crossEma21Down))
-earlySqzTriggerSell   = useSqzFireTrigger and (sqzFiredDown or (sqzBullDecel and crossOpenDown))
+// Squeeze dark green requires either an EMA21 breakdown OR a valid strict bearish divergence
+earlySqzTriggerSell   = useSqzFireTrigger and (sqzFiredDown or (sqzBullDecel and crossEma21Down) or (sqzBullDecel and bearishDiv))
 earlyStochTriggerSell = useStochTrigger and (crossStochDown and stochK > 60)
 earlySellCondition    = earlyDivTriggerSell or earlySqzTriggerSell or earlyStochTriggerSell
-earlySellSafety       = (not requireEma50Early or close < ema50) and regimeAllowed and notContradictSell and inSession and (close <= open or close < close[1]) and rsiFilterSell
+earlySellSafety       = (not requireEma50Early or close < ema50) and regimeAllowed and notContradictSell and inSession and (close <= open or close < close[1]) and rsiFilterSell and fibFilterSell
 earlySellSignal       = effEarlyReversal and earlySellCondition and earlySellSafety and compositeScore <= -effEarlyThresh and barsSinceSignal >= effCooldown
 
 // **** COMBINED FINAL SIGNALS ****
@@ -920,11 +943,18 @@ plotshape(standardSell, "SELL Signal (Trend)", shape.labeldown, location.aboveba
 plotshape(isEarlyOnlySell, "EARLY SELL Signal (Reversal)", shape.labeldown, location.abovebar,
      color=color.new(#ff5252, 0), size=size.normal, text="⚡SELL",
      textcolor=color.white)
+// --- Fibonacci Support/Resistance Lines ---
+plot(showFibs ? macroHigh : na, "Fib 0.000 (Top)", color=color.new(color.red, 70), style=plot.style_line)
+plot(showFibs ? fib382 : na, "Fib 0.382", color=color.new(color.orange, 70), style=plot.style_line)
+plot(showFibs ? fib500 : na, "Fib 0.500 (Equilibrium)", color=color.new(color.yellow, 50), style=plot.style_line)
+plot(showFibs ? fib618 : na, "Fib 0.618 (Golden Zone)", color=color.new(#00e676, 40), style=plot.style_line, linewidth=2)
+plot(showFibs ? fib786 : na, "Fib 0.786 (Deep Discount)", color=color.new(#00e676, 70), style=plot.style_line)
+plot(showFibs ? macroLow : na, "Fib 1.000 (Bottom)", color=color.new(color.teal, 70), style=plot.style_line)
 
 // --- Divergence Markers ---
-plotshape(useDivFilter and showDivPlots and (bullishDiv or hiddenBullDiv), "Bullish Divergence", shape.triangleup,
+plotshape(useDivFilter and showDivPlots and bullishDiv, "Bullish Divergence", shape.triangleup,
      location.belowbar, color=color.new(#00e676, 0), size=size.tiny, text="DIV", textcolor=color.white)
-plotshape(useDivFilter and showDivPlots and (bearishDiv or hiddenBearDiv), "Bearish Divergence", shape.triangledown,
+plotshape(useDivFilter and showDivPlots and bearishDiv, "Bearish Divergence", shape.triangledown,
      location.abovebar, color=color.new(#ff5252, 0), size=size.tiny, text="DIV", textcolor=color.white)
 
 // --- Score Label ---
@@ -1080,10 +1110,10 @@ if alertOnSell and standardSell
 if alertOnSell and isEarlyOnlySell
     alert("⚡ EARLY REVERSAL SELL! " + syminfo.ticker + " @ " + str.tostring(close, "#.##") + " | Score: " + str.tostring(compositeScore, "#.##"), alert.freq_once_per_bar_close)
 
-if alertOnBullDiv and (bullishDiv or hiddenBullDiv)
+if alertOnBullDiv and bullishDiv
     alert("📈 Bullish Divergence detected on " + syminfo.ticker + " @ " + str.tostring(close, "#.##") + " [Bottom Reversal Warning]", alert.freq_once_per_bar_close)
 
-if alertOnBearDiv and (bearishDiv or hiddenBearDiv)
+if alertOnBearDiv and bearishDiv
     alert("📉 Bearish Divergence detected on " + syminfo.ticker + " @ " + str.tostring(close, "#.##") + " [Top Reversal Warning]", alert.freq_once_per_bar_close)
 
 if alertOnApproach and compositeScore >= buyThreshold * 0.8 and not buySignal
