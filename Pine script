@@ -1,6 +1,6 @@
 // This Pine Script™ source code is subject to the terms of the Mozilla Public License 2.0
 // https://mozilla.org/MPL/2.0/
-// © Ultimate Multi-Indicator Strategy v4.5 Pro - High Contrast & Complete Guide
+// © Ultimate Multi-Indicator
 
 //@version=6
 strategy("Ultimate Buy/Sell Strategy v4.5 Pro", overlay=true, default_qty_type=strategy.percent_of_equity,
@@ -905,7 +905,16 @@ if strategy.position_size < 0 and barConfirmed and buySignal and not enableLong 
 // --- EMA Lines ---
 plot(showEMAs ? ema21 : na, "EMA 21", color=color.new(#26a69a, 30), linewidth=1)
 plot(showEMAs ? ema50 : na, "EMA 50", color=color.new(#42a5f5, 30), linewidth=1)
-plot(showEMAs ? ema200 : na, "EMA 200", color=color.new(#ef5350, 30), linewidth=2)
+// --- PlayBit EMA Ribbon (EMA 200) ---
+ema200Top = ta.ema(high, emaSlow)
+ema200Bot = ema200 // ta.ema(close, emaSlow)
+ribbonColor = close < ema200Bot ? color.rgb(255, 0, 0, 67) : 
+              close > ema200Top ? color.rgb(27, 255, 27, 67) : 
+              color.rgb(120, 123, 134, 67)
+
+pEmaTop = plot(showEMAs ? ema200Top : na, "EMA 200 Top", color=color.new(#ef5350, 30), linewidth=1)
+pEmaBot = plot(showEMAs ? ema200Bot : na, "EMA 200 Bot", color=color.new(#ef5350, 30), linewidth=1)
+fill(pEmaTop, pEmaBot, color=showEMAs ? ribbonColor : na, title="EMA 200 Ribbon")
 
 // --- Squeeze Momentum Dots on EMA 21 ---
 sqzDotColor = sqzOn ? color.new(#ff9800, 0) : sqzBullAccel ? color.new(#00e676, 0) : sqzBullDecel ? color.new(#2e7d32, 0) : sqzBearAccel ? color.new(#ff1744, 0) : color.new(#c62828, 0)
@@ -959,13 +968,8 @@ plotshape(useDivFilter and showDivPlots and bearishDiv, "Bearish Divergence", sh
 
 // --- Score Label ---
 if showScore and (buySignal or sellSignal)
-    tagText = isEarlyOnlyBuy ? "[EARLY REVERSAL]\n" : isEarlyOnlySell ? "[EARLY REVERSAL]\n" : ""
-    scoreText = tagText + "Score: " + safeNum(compositeScore, "#.##") +
-         "\nTrend: " + safeNum(trendScore, "#.##") +
-         "\nMom: " + safeNum(momScore, "#.##") +
-         "\nVol: " + safeNum(volumeScore, "#.##") +
-         "\nMFI: " + safeNum(mfiVal, "#.#") +
-         "\nChop: " + safeNum(chopVal, "#.#")
+    signalName = buySignal ? (isEarlyOnlyBuy ? "⚡ EARLY BUY" : "BUY") : (isEarlyOnlySell ? "⚡ EARLY SELL" : "SELL")
+    scoreText = signalName + "\nScore: " + safeNum(compositeScore, "#.##")
     labelColor = buySignal ? (isEarlyOnlyBuy ? color.new(#00e676, 10) : color.new(#00c853, 10)) : (isEarlyOnlySell ? color.new(#ff5252, 10) : color.new(#ff1744, 10))
     labelTextColor = isEarlyOnlyBuy ? color.black : color.white
     labelYPos  = buySignal ? low - atrVal * 2 : high + atrVal * 2
