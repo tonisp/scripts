@@ -1,6 +1,6 @@
 // This Pine Script™ source code is subject to the terms of the Mozilla Public License 2.0
 // https://mozilla.org/MPL/2.0/
-// © Ultimate Multi-Indicator
+// © Ultimate Multi-Indicator Strategy v4.5 Pro - High Contrast & Complete Guide
 
 //@version=6
 strategy("Ultimate Buy/Sell Strategy v4.5 Pro", overlay=true, default_qty_type=strategy.percent_of_equity,
@@ -56,6 +56,14 @@ adxLen         = input.int(14, "ADX Length", minval=7, maxval=30, group=grp_tren
 adxThresh      = input.int(20, "ADX Trend Threshold", minval=10, maxval=40, group=grp_trend)
 stFactor       = input.float(3.0, "Supertrend Factor", minval=1.0, maxval=5.0, step=0.5, group=grp_trend)
 stPeriod       = input.int(10, "Supertrend ATR Period", minval=5, maxval=20, group=grp_trend)
+
+grp_utbot      = "═══ UT Bot Alerts ═══"
+useUtBot       = input.bool(true, "Use UT Bot in Trend Score", group=grp_utbot, tooltip="Kui aktiivne, annab UT Bot oma suuna alusel trendiskoorile lisapunkte (+/- 0.25).")
+requireUtBot   = input.bool(false, "Strict Filter: Require UT Bot Agreement", group=grp_utbot, tooltip="Kui aktiivne, blokeeritakse KÕIK ostusignaalid (ka varajased), kui UT Bot on punane. Kasuta hoolikalt!")
+utKey          = input.float(1.0, "UT Bot Key Value (Sensitivity)", step=0.5, group=grp_utbot)
+utAtrPeriod    = input.int(10, "UT Bot ATR Period", group=grp_utbot)
+utUseHA        = input.bool(false, "UT Bot Signals from Heikin Ashi", group=grp_utbot)
+showUtBot      = input.bool(true, "Show UT Bot Line on Chart", group=grp_utbot)
 
 // --- Smart Money Concepts (SMC) Market Structure ---
 grp_smc             = "═══ Smart Money Concepts (SMC) ═══"
@@ -158,10 +166,11 @@ ceMult              = input.float(2.0, "Chandelier ATR Multiplier", minval=0.5, 
 
 // --- Visual Settings & Table Display ---
 grp_vis = "═══ Visual Settings & Info Table ═══"
-showBB       = input.bool(true, "Show Bollinger Bands", group=grp_vis)
+showBB       = input.bool(false, "Show Bollinger Bands", group=grp_vis)
 showEMAs     = input.bool(true, "Show EMA Lines", group=grp_vis)
+showEma9     = input.bool(true, "Show EMA 9 (Scalp)", group=grp_vis)
 showSqzDots  = input.bool(true, "Show Squeeze Dots on EMA 21", group=grp_vis, tooltip="Colors dots on EMA 21 to visualize Squeeze: Orange = Squeeze On, Lime = Bullish Acceleration, Red = Bearish Acceleration.")
-showVWMA     = input.bool(false, "Show VWMA Line", group=grp_vis)
+showVWMA     = input.bool(true, "Show VWMA 20 Line", group=grp_vis)
 showVWAP     = input.bool(true, "Show VWAP", group=grp_vis)
 showST       = input.bool(true, "Show Supertrend", group=grp_vis)
 showTable    = input.bool(true, "Show Info Table", group=grp_vis)
@@ -249,6 +258,7 @@ if useGoldenCross
     crossScore := goldenCross ? 0.35 : -0.35
 
 // --- EMA ---
+ema9   = ta.ema(close, 9)
 ema21  = ta.ema(close, emaFast)
 ema50  = ta.ema(close, emaMid)
 ema200 = ta.ema(close, emaSlow)
@@ -270,6 +280,23 @@ adxScore := trendStrength ? (diPlus > diMinus ? 1.0 : -1.0) : 0.0
 // --- Supertrend ---
 [stLine, stDir] = ta.supertrend(stFactor, stPeriod)
 stScore = stDir == -1 ? 1.0 : -1.0
+
+// --- UT Bot Alerts ---
+utAtr  = ta.atr(utAtrPeriod)
+utLoss = utKey * utAtr
+utHaTicker = ticker.heikinashi(syminfo.tickerid)
+utSrc = utUseHA ? request.security(utHaTicker, timeframe.period, close, lookahead = barmerge.lookahead_off) : close
+
+var float utStop = 0.0
+utStop := utSrc > nz(utStop[1], 0) and utSrc[1] > nz(utStop[1], 0) ? math.max(nz(utStop[1]), utSrc - utLoss) :
+          utSrc < nz(utStop[1], 0) and utSrc[1] < nz(utStop[1], 0) ? math.min(nz(utStop[1]), utSrc + utLoss) : 
+          utSrc > nz(utStop[1], 0) ? utSrc - utLoss : utSrc + utLoss
+          
+var int utPos = 0   
+utPos := utSrc[1] < nz(utStop[1], 0) and utSrc > nz(utStop[1], 0) ? 1 :
+         utSrc[1] > nz(utStop[1], 0) and utSrc < nz(utStop[1], 0) ? -1 : nz(utPos[1], 0)
+
+utScore = useUtBot ? (utPos == 1 ? 0.25 : -0.25) : 0.0
 
 // --- Ichimoku Cloud ---
 tenkan   = (ta.highest(high, 9) + ta.lowest(low, 9)) / 2
@@ -319,6 +346,7 @@ if useSMC
 
 // --- Combined Trend Score ---
 trendScore = useSMC ? (emaScore * 0.25 + adxScore * 0.20 + stScore * 0.15 + ichiScore * 0.20 + smcScore * 0.20) : (emaScore * 0.30 + adxScore * 0.25 + stScore * 0.20 + ichiScore * 0.25)
+trendScore := trendScore + utScore
 trendScore := math.max(-1.0, math.min(1.0, trendScore))
 
 
@@ -685,6 +713,9 @@ compositeScore := math.max(-1.0, math.min(1.0, compositeScore))
 
 // Plot composite score invisibly so it is accessible as plot_0 in alerts
 plot(compositeScore, "Composite Score Value", display=display.none)
+plot(trendScore, "Trend Score Value", display=display.none)
+plot(momScore, "Momentum Score Value", display=display.none)
+plot(volumeScore, "Volume Score Value", display=display.none)
 
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -765,9 +796,13 @@ macdFilterSell     = not useMacdFilter or not (macdHistRiseSell or macdOverexten
 smcFilterBuy       = not effRequireBOS or marketStructure >= 0
 smcFilterSell      = not effRequireBOS or marketStructure <= 0
 
+// --- UT Bot Strict Filter ---
+utBotConfirmBuy    = not requireUtBot or utPos == 1
+utBotConfirmSell   = not requireUtBot or utPos == -1
+
 // --- Standard Trend-Following Signals (Ideal for 30m / 1h) ---
-standardBuy  = compositeScore >= effBuyThresh and barsSinceSignal >= effCooldown and volumeConfirm and notContradictBuy and regimeAllowed and paConfirmBuy and inSession and ema200ConfirmBuy and rsiFilterBuy and macdFilterBuy and smcFilterBuy
-standardSell = compositeScore <= effSellThresh and barsSinceSignal >= effCooldown and volumeConfirm and notContradictSell and regimeAllowed and paConfirmSell and inSession and ema200ConfirmSell and rsiFilterSell and macdFilterSell and smcFilterSell
+standardBuy  = compositeScore >= effBuyThresh and barsSinceSignal >= effCooldown and volumeConfirm and notContradictBuy and regimeAllowed and paConfirmBuy and inSession and ema200ConfirmBuy and rsiFilterBuy and macdFilterBuy and smcFilterBuy and utBotConfirmBuy
+standardSell = compositeScore <= effSellThresh and barsSinceSignal >= effCooldown and volumeConfirm and notContradictSell and regimeAllowed and paConfirmSell and inSession and ema200ConfirmSell and rsiFilterSell and macdFilterSell and smcFilterSell and utBotConfirmSell
 
 // Pre-calculate stateful functions to prevent execution warnings
 crossEma21Up   = ta.crossover(close, ema21)
@@ -795,7 +830,7 @@ earlySqzTriggerBuy    = useSqzFireTrigger and (sqzFiredUp or (sqzBearDecel and c
 earlyStochTriggerBuy  = useStochTrigger and (crossStochUp and stochK < 40)
 earlyBuyCondition     = earlyDivTriggerBuy or earlySqzTriggerBuy or earlyStochTriggerBuy
 earlyBuySafety        = (not requireEma50Early or close > ema50) and regimeAllowed and notContradictBuy and inSession and (close >= open or close > close[1]) and rsiFilterBuy and fibFilterBuy
-earlyBuySignal        = effEarlyReversal and earlyBuyCondition and earlyBuySafety and compositeScore >= effEarlyThresh and barsSinceSignal >= effCooldown
+earlyBuySignal        = effEarlyReversal and earlyBuyCondition and earlyBuySafety and compositeScore >= effEarlyThresh and barsSinceSignal >= effCooldown and utBotConfirmBuy
 
 earlyDivTriggerSell   = useDivTrigger and (bearishDiv or (bearDivActive and crossEma21Down))
 // Squeeze dark green requires either an EMA21 breakdown OR a valid strict bearish divergence
@@ -803,7 +838,7 @@ earlySqzTriggerSell   = useSqzFireTrigger and (sqzFiredDown or (sqzBullDecel and
 earlyStochTriggerSell = useStochTrigger and (crossStochDown and stochK > 60)
 earlySellCondition    = earlyDivTriggerSell or earlySqzTriggerSell or earlyStochTriggerSell
 earlySellSafety       = (not requireEma50Early or close < ema50) and regimeAllowed and notContradictSell and inSession and (close <= open or close < close[1]) and rsiFilterSell and fibFilterSell
-earlySellSignal       = effEarlyReversal and earlySellCondition and earlySellSafety and compositeScore <= -effEarlyThresh and barsSinceSignal >= effCooldown
+earlySellSignal       = effEarlyReversal and earlySellCondition and earlySellSafety and compositeScore <= -effEarlyThresh and barsSinceSignal >= effCooldown and utBotConfirmSell
 
 // **** COMBINED FINAL SIGNALS ****
 buySignal       = standardBuy or earlyBuySignal
@@ -920,8 +955,15 @@ fill(pEmaTop, pEmaBot, color=showEMAs ? ribbonColor : na, title="EMA 200 Ribbon"
 sqzDotColor = sqzOn ? color.new(#ff9800, 0) : sqzBullAccel ? color.new(#00e676, 0) : sqzBullDecel ? color.new(#2e7d32, 0) : sqzBearAccel ? color.new(#ff1744, 0) : color.new(#c62828, 0)
 plot(showSqzDots and showEMAs and useSqueeze ? ema21 : na, "Squeeze Dots on EMA 21", color=sqzDotColor, style=plot.style_circles, linewidth=2)
 
-// --- VWMA Line (TradingAgents) ---
-plot(showVWMA ? vwmaVal : na, "VWMA 20", color=color.new(#00bcd4, 30), linewidth=2)
+
+// --- EMA 9 / VWMA 20 Golden Cross ---
+ema9CrossUp   = ta.crossover(ema9, vwmaVal)
+ema9CrossDown = ta.crossunder(ema9, vwmaVal)
+gcCompRising  = compositeScore >= -0.15 and (compositeScore[1] < -0.15 or (compositeScore > compositeScore[1] and ta.lowest(compositeScore, 4)[1] < -0.15))
+gcCondition   = ema9CrossUp and (stDir == -1 or (stDir == 1 and gcCompRising))
+dcCondition   = ema9CrossDown and stDir == 1
+plotshape(showEma9 and showVWMA and gcCondition, "EMA9/VWMA20 Golden Cross", shape.diamond, location.belowbar, color=color.new(#ffd600, 0), size=size.small, text="GC ↑", textcolor=color.new(#ffd600, 0))
+plotshape(showEma9 and showVWMA and dcCondition, "EMA9/VWMA20 Death Cross", shape.diamond, location.abovebar, color=color.new(#ff5252, 0), size=size.small, text="DC ↓", textcolor=color.new(#ff5252, 0))
 
 // --- Bollinger Bands ---
 bbUpperPlot = plot(showBB ? bbUpper : na, "BB Upper", color=color.new(#7e57c2, 60))
@@ -934,7 +976,14 @@ plot(showVWAP ? vwapVal : na, "VWAP", color=color.new(#ff9800, 30), linewidth=2,
 
 // --- Supertrend ---
 stColor = stDir == -1 ? color.new(#26a69a, 20) : color.new(#ef5350, 20)
-plot(showST ? stLine : na, "Supertrend", color=stColor, linewidth=2, style=plot.style_linebr)
+stFillColor = stDir == -1 ? color.new(#26a69a, 90) : color.new(#ef5350, 90)
+pST    = plot(showST ? stLine : na, "Supertrend", color=stColor, linewidth=2, style=plot.style_linebr)
+pClose = plot(showST ? close : na, "ST Close", display=display.none)
+fill(pST, pClose, color=showST ? stFillColor : na, title="Supertrend Fill")
+
+// --- UT Bot Line ---
+utColor = utPos == 1 ? color.new(#00e676, 0) : utPos == -1 ? color.new(#ff5252, 0) : color.new(color.blue, 0)
+plot(showUtBot ? utStop : na, "UT Bot Alerts", color=utColor, linewidth=2, style=plot.style_linebr)
 
 // --- Buy/Sell Signals ---
 plotshape(standardBuy, "BUY Signal (Trend)", shape.labelup, location.belowbar,
@@ -965,6 +1014,10 @@ plotshape(useDivFilter and showDivPlots and bullishDiv, "Bullish Divergence", sh
      location.belowbar, color=color.new(#00e676, 0), size=size.tiny, text="DIV", textcolor=color.white)
 plotshape(useDivFilter and showDivPlots and bearishDiv, "Bearish Divergence", shape.triangledown,
      location.abovebar, color=color.new(#ff5252, 0), size=size.tiny, text="DIV", textcolor=color.white)
+
+// --- EMA 9 & VWMA 20 (Kõige peal — joonistatakse viimasena) ---
+plot(showVWMA ? vwmaVal : na, "VWMA 20", color=color.new(#ffd600, 0), linewidth=2)
+plot(showEma9 ? ema9 : na, "EMA 9 (Scalp)", color=color.new(#2196f3, 0), linewidth=2)
 
 // --- Score Label ---
 if showScore and (buySignal or sellSignal)
@@ -1125,6 +1178,8 @@ if alertOnApproach and compositeScore >= buyThreshold * 0.8 and not buySignal
 
 if alertOnApproach and compositeScore <= sellThreshold * 0.8 and not sellSignal
     alert("⚠️ Approaching SELL zone | " + syminfo.ticker + " | Score: " + str.tostring(compositeScore, "#.###"), alert.freq_once_per_bar)
+
+
 
 // ==============================================================================
 //                   13. POHJALIK KASUTUSJUHEND JA SELGITUSED
