@@ -1,0 +1,966 @@
+// This Pine Script™ source code is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+// © Ultimate Multi-Indicator Strategy v4.5 Pro - High Contrast & Complete Guide
+
+//@version=6
+indicator("Ultimate Score Oscillator v4.5", overlay=false, max_lines_count=1, max_labels_count=1)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░░  INPUT SETTINGS  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- Strategy Trade Direction (Backtesting) ---
+grp_strat       = "═══ Strategy & Backtest Trade Direction ═══"
+enableLong      = input.bool(true, "Allow BUY (Long) Trades", group=grp_strat, tooltip="Enables entering Long trades on BUY signals.")
+enableShort     = input.bool(false, "Allow SELL (Short) Trades", group=grp_strat, tooltip="Enables entering Short trades on SELL signals. Disable this to test Long-only performance.")
+closeLongOnSell = input.bool(true, "Close Long on SELL Signal (when Short disabled)", group=grp_strat, tooltip="If Short trades are turned off, exits active Long position when a SELL signal appears.")
+closeShortOnBuy = input.bool(true, "Close Short on BUY Signal (when Long disabled)", group=grp_strat, tooltip="If Long trades are turned off, exits active Short position when a BUY signal appears.")
+
+// --- Timeframe Auto-Adaptation ---
+grp_auto          = "═══ Dynamic Timeframe Adaptation ═══"
+useAutoAdaptiveTF = input.bool(true, "Auto-Adapt Settings to Chart Timeframe", group=grp_auto, tooltip="When enabled, automatically fine-tunes filters, lookbacks, and thresholds based on chart timeframe.")
+
+// --- Signal Thresholds ---
+grp_sig = "═══ Signal Settings ═══"
+buyThreshold    = input.float(0.40, "Buy Threshold (Composite Score)", minval=0.1, maxval=1.0, step=0.05, group=grp_sig)
+sellThreshold   = input.float(-0.40, "Sell Threshold (Composite Score)", minval=-1.0, maxval=-0.1, step=0.05, group=grp_sig)
+cooldownBars    = input.int(3, "Signal Cooldown (bars)", minval=1, maxval=50, group=grp_sig)
+requireVolAbove = input.bool(false, "Require Volume > 20 SMA [Lag Filter - Best for 30m+]", group=grp_sig)
+
+// --- Early Reversal Entries (Fast TF: 1m / 5m / 15m) ---
+grp_early         = "═══ Early Reversal Entries (Fast TF: 1m / 5m / 15m) ═══"
+useEarlyReversal  = input.bool(false, "Enable Early Reversal Entries", group=grp_early, tooltip="Catches bottom bounces and momentum shifts early. Backtest-proven: only profitable on 1h+ timeframes. Auto-Adaptation enables this automatically on 1h+.")
+earlyBuyThresh    = input.float(0.15, "Early Buy Score Threshold", minval=-0.2, maxval=0.5, step=0.05, group=grp_early, tooltip="Required composite score for early entry. Lower (e.g. 0.15) allows entering right at the pivot/bounce before lag filters turn green.")
+useDivTrigger     = input.bool(true, "Trigger on Bullish Divergence", group=grp_early, tooltip="Allows early BUY when regular or hidden bullish RSI divergence appears.")
+useSqzFireTrigger = input.bool(true, "Trigger on Squeeze Momentum Fire / Turn", group=grp_early, tooltip="Allows early BUY when Squeeze fires or momentum turns up from negative territory.")
+useStochTrigger   = input.bool(true, "Trigger on Stoch RSI Oversold Cross", group=grp_early, tooltip="Allows early BUY when Stoch RSI crosses up from oversold territory (< 40).")
+requireEma50Early = input.bool(false, "Require Price > EMA 50 for Early BUY", group=grp_early, tooltip="Optional safety: only take early reversal if price is above mid-term EMA 50.")
+
+// --- Market Regime / Chop Filter ---
+grp_chop = "═══ Market Regime / Chop Filter ═══"
+useChopFilter = input.bool(true, "Filter Consolidation / Chop", group=grp_chop, tooltip="Blocks new signals when market is in a sideways chop or range.")
+chopLen       = input.int(14, "Choppiness Length", minval=5, maxval=50, group=grp_chop)
+chopThresh    = input.float(60.0, "Chop Threshold (Consolidation)", minval=45.0, maxval=75.0, step=1.0, group=grp_chop, tooltip="Above this value, the market is consolidated and signals are blocked.")
+
+// --- Trend Settings ---
+grp_trend = "═══ Trend Indicators ═══"
+emaFast        = input.int(21, "EMA Fast", minval=5, maxval=50, group=grp_trend)
+emaMid         = input.int(50, "EMA Mid (SMA 50 Benchmark)", minval=20, maxval=100, group=grp_trend)
+emaSlow        = input.int(200, "EMA Slow (SMA 200 Benchmark)", minval=100, maxval=400, group=grp_trend)
+useGoldenCross = input.bool(true, "Track 50/200 Golden & Death Cross", group=grp_trend, tooltip="TradingAgents benchmark: 50 SMA > 200 SMA indicates long-term institutional bull market bias.")
+requireEma200  = input.bool(true, "Require Price > 200 EMA [Backtest-Proven]", group=grp_trend, tooltip="Backtest-proven: filtering buys when price is below 200 EMA improves win rate on 5m and 15m. Auto-Adaptation controls this per timeframe.")
+adxLen         = input.int(14, "ADX Length", minval=7, maxval=30, group=grp_trend)
+adxThresh      = input.int(20, "ADX Trend Threshold", minval=10, maxval=40, group=grp_trend)
+stFactor       = input.float(3.0, "Supertrend Factor", minval=1.0, maxval=5.0, step=0.5, group=grp_trend)
+stPeriod       = input.int(10, "Supertrend ATR Period", minval=5, maxval=20, group=grp_trend)
+
+grp_utbot      = "═══ UT Bot Alerts ═══"
+useUtBot       = input.bool(true, "Use UT Bot in Trend Score", group=grp_utbot, tooltip="Kui aktiivne, annab UT Bot oma suuna alusel trendiskoorile lisapunkte (+/- 0.25).")
+requireUtBot   = input.bool(false, "Strict Filter: Require UT Bot Agreement", group=grp_utbot, tooltip="Kui aktiivne, blokeeritakse KÕIK ostusignaalid (ka varajased), kui UT Bot on punane. Kasuta hoolikalt!")
+utKey          = input.float(1.0, "UT Bot Key Value (Sensitivity)", step=0.5, group=grp_utbot)
+utAtrPeriod    = input.int(10, "UT Bot ATR Period", group=grp_utbot)
+utUseHA        = input.bool(false, "UT Bot Signals from Heikin Ashi", group=grp_utbot)
+showUtBot      = input.bool(true, "Show UT Bot Line on Chart", group=grp_utbot)
+
+// --- Smart Money Concepts (SMC) Market Structure ---
+grp_smc             = "═══ Smart Money Concepts (SMC) ═══"
+useSMC              = input.bool(true, "Use SMC Market Structure & BOS", group=grp_smc, tooltip="Tracks Swing Highs/Lows and detects Bullish/Bearish Break of Structure (BOS).")
+smcLen              = input.int(5, "SMC Pivot Lookback Bars", minval=2, maxval=20, group=grp_smc)
+requireBullStructure= input.bool(false, "Require SMC Bullish BOS [Lag Filter - Best for 30m+]", group=grp_smc, tooltip="Blocks BUY signals if market structure hasn't broken swing high. Creates delay on fast 1m-15m charts; best for 30m-1h.")
+
+// --- Momentum Settings ---
+grp_mom = "═══ Momentum Indicators ═══"
+rsiLen          = input.int(14, "RSI Length", minval=7, maxval=30, group=grp_mom)
+rsiOB           = input.int(65, "RSI Overbought Level (Scoring)", minval=60, maxval=85, group=grp_mom)
+rsiOS           = input.int(35, "RSI Oversold Level (Scoring)", minval=15, maxval=40, group=grp_mom)
+useRsiFilter    = input.bool(true, "Block BUY when RSI Overbought", group=grp_mom, tooltip="Prevents BUY signals when RSI is above the max threshold (avoids buying at overextended tops).")
+rsiMaxBuyLevel  = input.int(70, "Max RSI for BUY Signal", minval=50, maxval=85, group=grp_mom, tooltip="If RSI is above this value, BUY signals will be blocked.")
+rsiMinSellLevel = input.int(30, "Min RSI for SELL Signal", minval=15, maxval=50, group=grp_mom, tooltip="If RSI is below this value, SELL signals will be blocked.")
+macdFast        = input.int(12, "MACD Fast", minval=5, maxval=20, group=grp_mom)
+macdSlow        = input.int(26, "MACD Slow", minval=15, maxval=40, group=grp_mom)
+macdSignal      = input.int(9, "MACD Signal", minval=5, maxval=15, group=grp_mom)
+useMacdFilter   = input.bool(true, "Block BUY when MACD Overextended", group=grp_mom, tooltip="Blocks BUY signals when MACD is stretched high above 0 or histogram is declining (warning of imminent drop).")
+macdMaxAtrMult  = input.float(1.5, "Max MACD / ATR Mult", minval=0.5, maxval=4.0, step=0.25, group=grp_mom, tooltip="If MACD Line > ATR * this multiplier, MACD is considered dangerously high.")
+blockOnHistDrop = input.bool(false, "Block BUY on MACD Hist Decel [Lag Filter - Best for 30m+]", group=grp_mom, tooltip="Blocks BUY if MACD is above 0 and histogram has fallen for 2 consecutive bars. On 1m-5m this causes late signals; best for 30m-1h.")
+stochLen        = input.int(14, "Stochastic RSI Length", minval=7, maxval=21, group=grp_mom)
+stochSmK    = input.int(3, "Stoch RSI Smooth K", minval=1, maxval=5, group=grp_mom)
+stochSmD    = input.int(3, "Stoch RSI Smooth D", minval=1, maxval=5, group=grp_mom)
+
+// --- Divergence Settings ---
+grp_div = "═══ Divergence Engine ═══"
+useDivFilter = input.bool(true, "Enable Divergence Detection", group=grp_div, tooltip="Detects Bullish/Bearish regular and hidden divergences between Price and RSI.")
+divLeft      = input.int(5, "Pivot Left Bars", minval=2, maxval=15, group=grp_div)
+divRight     = input.int(2, "Pivot Right Bars", minval=1, maxval=5, group=grp_div)
+showDivPlots = input.bool(true, "Show Divergence Marks on Chart", group=grp_div)
+
+// --- Price Action / Candle Filter ---
+grp_pa = "═══ Price Action & Candle Filter ═══"
+useCandleFilter = input.bool(true, "Require Favorable Candle Close", group=grp_pa, tooltip="Ensures BUY closes in upper half without long rejection wick, and SELL closes in lower half.")
+
+// --- Volatility & Squeeze ---
+grp_vol      = "═══ Volatility & Squeeze ═══"
+bbLen        = input.int(20, "Bollinger Bands Length", minval=10, maxval=50, group=grp_vol)
+bbMult       = input.float(2.0, "Bollinger Bands Mult", minval=1.0, maxval=3.0, step=0.5, group=grp_vol)
+kcLen        = input.int(20, "Keltner Channel Length", minval=10, maxval=50, group=grp_vol)
+kcMult       = input.float(1.5, "Keltner Channel Mult", minval=1.0, maxval=3.0, step=0.5, group=grp_vol)
+useSqueeze   = input.bool(true, "Use Squeeze Momentum", group=grp_vol, tooltip="Integrates Squeeze momentum calculation into volatility scoring.")
+useTrueRange = input.bool(true, "Use TrueRange for KC", group=grp_vol)
+atrLen       = input.int(14, "ATR Length", minval=7, maxval=30, group=grp_vol)
+
+// --- Volume & Money Flow (TradingAgents Suite) ---
+grp_volu = "═══ Volume & Money Flow (TradingAgents Suite) ═══"
+volSmaLen   = input.int(20, "Volume SMA Length", minval=10, maxval=50, group=grp_volu)
+volSpikeMul = input.float(2.0, "Volume Spike Multiplier", minval=1.5, maxval=4.0, step=0.5, group=grp_volu)
+useCMF      = input.bool(true, "Use Chaikin Money Flow (CMF)", group=grp_volu, tooltip="Measures institutional money flow accumulation/distribution.")
+cmfLen      = input.int(20, "CMF Length", minval=10, maxval=50, group=grp_volu)
+useMFI      = input.bool(true, "Use Money Flow Index (MFI - TradingAgents)", group=grp_volu, tooltip="TradingAgents indicator: Volume-weighted RSI with 80/20 overbought/oversold levels.")
+mfiLen      = input.int(14, "MFI Length", minval=7, maxval=30, group=grp_volu)
+useVWMA     = input.bool(true, "Use VWMA vs SMA (TradingAgents)", group=grp_volu, tooltip="TradingAgents indicator: VWMA > SMA confirms high-volume institutional support.")
+vwmaLen     = input.int(20, "VWMA / SMA Benchmark Length", minval=10, maxval=50, group=grp_volu)
+useVFI      = input.bool(true, "Use Volume Flow Indicator (VFI - Katsanos)", group=grp_volu, tooltip="Markos Katsanos Volume Flow Indicator measuring institutional accumulation/distribution.")
+vfiLength   = input.int(30, "VFI Length", minval=10, maxval=130, group=grp_volu)
+vfiCoef     = input.float(0.2, "VFI Cutoff Coef", minval=0.1, maxval=0.5, step=0.05, group=grp_volu)
+
+// --- Market Context ---
+grp_mkt = "═══ Market Context ═══"
+useMarketCtx = input.bool(true, "Use S&P 500 / VIX Context", group=grp_mkt, tooltip="Enable/disable market context analysis using SPX and VIX. Stabilizes performance across different tickers.")
+spxSymbol    = input.symbol("SPX", "S&P 500 Symbol", group=grp_mkt)
+vixSymbol    = input.symbol("VIX", "VIX Symbol", group=grp_mkt)
+nasdaqSymbol = input.symbol("QQQ", "Nasdaq / QQQ Symbol", group=grp_mkt)
+
+// --- Multi-Timeframe ---
+grp_mtf = "═══ Multi-Timeframe (Non-Repainting) ═══"
+useMTF      = input.bool(true, "Enable Multi-Timeframe Confirmation", group=grp_mtf, tooltip="When enabled, adds up to +0.15 score if higher timeframe is aligned with the signal. Improves accuracy across different tickers.")
+htfAutoRes  = input.bool(true, "Auto-detect Higher TF", group=grp_mtf, tooltip="Automatically selects a higher timeframe based on current chart.")
+
+// --- Fibonacci Support/Resistance ---
+grp_fib = "═══ Fibonacci Structural Filter ═══"
+useFibFilter = input.bool(false, "Use Fibonacci Support Filter (Discount Zone)", group=grp_fib, tooltip="Only allows Early Reversal BUY signals if price is in the Discount Zone (below 0.500 Fib) and SELL signals in Premium Zone. Prevents catching falling knives mid-trend.")
+showFibs     = input.bool(false, "Show Fibonacci Levels on Chart", group=grp_fib)
+baseFibLookback = input.int(200, "Base Fibonacci Lookback (bars)", group=grp_fib, tooltip="How many bars to look back. Auto-adapts if Auto-Adapt is enabled.")
+
+// --- Session Filter ---
+grp_sess = "═══ Trading Session Filter ═══"
+useSessionFilter = input.bool(false, "Filter Trading Hours", group=grp_sess, tooltip="Only trigger signals during specified market session.")
+sessTime         = input.session("0900-1700:23456", "Active Session (Exchange Time)", group=grp_sess)
+
+// --- Risk Management ---
+grp_risk = "═══ Risk Management & Stops ═══"
+useStopLoss  = input.bool(true, "Use ATR Stop-Loss", group=grp_risk)
+slAtrMult    = input.float(1.5, "Stop-Loss ATR Multiplier", minval=0.5, maxval=5.0, step=0.5, group=grp_risk, tooltip="1.5 ATR stop loss.")
+tpAtrMult    = input.float(2.5, "Take-Profit ATR Multiplier", minval=1.0, maxval=10.0, step=0.5, group=grp_risk, tooltip="2.5 ATR take profit.")
+useTrailing  = input.bool(false, "Use Trailing Stop", group=grp_risk, tooltip="Off by default to avoid collision with Take Profit limit order. Turn on if you prefer trailing stop over fixed TP.")
+trailAtrMult = input.float(2.0, "Trailing Stop ATR Mult", minval=0.5, maxval=5.0, step=0.5, group=grp_risk, tooltip="Trailing stop distance in ATR.")
+useBreakEven = input.bool(false, "Use Break-Even Stop", group=grp_risk, tooltip="Moves stop loss to entry price + offset once trade reaches target ATR profit. OFF by default — backtest proved BE harmful on 5m/30m (noise stops out winners early).")
+beTriggerAtr = input.float(2.0, "Break-Even Trigger (ATR Mult)", minval=0.5, maxval=5.0, step=0.25, group=grp_risk, tooltip="At +2.0 ATR profit, moves stop loss to breakeven. Only useful on 15m+ timeframes.")
+beOffsetAtr  = input.float(0.1, "Break-Even Profit Offset (ATR Mult)", minval=0.0, maxval=1.0, step=0.05, group=grp_risk)
+useScoreFlipExit    = input.bool(false, "Exit on Composite Score Flip", group=grp_risk, tooltip="If enabled, closes position when score flips against it. Disabling this lets trades breathe and reach TP / Trailing Stop.")
+scoreFlipBuyThresh  = input.float(-0.35, "Score Flip BUY Exit Level", minval=-1.0, maxval=0.0, step=0.05, group=grp_risk, tooltip="Score below this will close BUY position if Score Flip Exit is enabled.")
+scoreFlipSellThresh = input.float(0.35, "Score Flip SELL Exit Level", minval=0.0, maxval=1.0, step=0.05, group=grp_risk, tooltip="Score above this will close SELL position if Score Flip Exit is enabled.")
+useChandelier       = input.bool(false, "Use Chandelier Trailing Exit", group=grp_risk, tooltip="Dynamic trailing stop based on Chuck LeBeau's highest high minus ATR multiplier.")
+ceAtrPeriod         = input.int(14, "Chandelier ATR Period", minval=1, maxval=30, group=grp_risk)
+ceMult              = input.float(2.0, "Chandelier ATR Multiplier", minval=0.5, maxval=5.0, step=0.25, group=grp_risk)
+
+// --- Visual Settings & Table Display ---
+grp_vis = "═══ Visual Settings & Info Table ═══"
+showBB       = input.bool(true, "Show Bollinger Bands", group=grp_vis)
+showEMAs     = input.bool(true, "Show EMA Lines", group=grp_vis)
+showSqzDots  = input.bool(true, "Show Squeeze Dots on EMA 21", group=grp_vis, tooltip="Colors dots on EMA 21 to visualize Squeeze: Orange = Squeeze On, Lime = Bullish Acceleration, Red = Bearish Acceleration.")
+showVWMA     = input.bool(false, "Show VWMA Line", group=grp_vis)
+showVWAP     = input.bool(true, "Show VWAP", group=grp_vis)
+showST       = input.bool(true, "Show Supertrend", group=grp_vis)
+showTable    = input.bool(true, "Show Info Table", group=grp_vis)
+tablePosOpt  = input.string("Top Right", "Table Position", options=["Top Right", "Bottom Right", "Top Left", "Bottom Left"], group=grp_vis, tooltip="Choose where the info table sits on your chart.")
+tableSizeOpt = input.string("Tiny", "Table Text Size", options=["Tiny", "Small", "Normal"], group=grp_vis, tooltip="Tiny is recommended so the 20-row table never overflows or gets clipped by TradingView.")
+showScore    = input.bool(true, "Show Score Labels", group=grp_vis)
+
+// --- Alert Notifications Settings ---
+grp_alerts        = "═══ Alert Notifications Settings ═══"
+alertOnBuy        = input.bool(true, "Alert on BUY Signal (Standard & Early)", group=grp_alerts, tooltip="Sends alert when any BUY signal occurs.")
+alertOnEarlyBuy   = input.bool(true, "Alert on Early Reversal BUY specifically", group=grp_alerts, tooltip="Sends alert specifically when an Early Reversal entry triggers.")
+alertOnSell       = input.bool(true, "Alert on SELL Signal", group=grp_alerts, tooltip="Sends alert when SELL signal occurs.")
+alertOnBullDiv    = input.bool(true, "Alert on Bullish Divergence", group=grp_alerts, tooltip="Sends alert when Bullish Divergence is detected.")
+alertOnBearDiv    = input.bool(false, "Alert on Bearish Divergence", group=grp_alerts, tooltip="Sends alert when Bearish Divergence is detected.")
+alertOnApproach   = input.bool(false, "Alert on Approaching Zones", group=grp_alerts, tooltip="Sends alert when score approaches buy/sell threshold.")
+
+// --- Weights ---
+grp_w = "═══ Category Weights ═══"
+wTrend   = input.float(0.30, "Trend Weight", minval=0.0, maxval=1.0, step=0.05, group=grp_w)
+wMom     = input.float(0.25, "Momentum Weight", minval=0.0, maxval=1.0, step=0.05, group=grp_w)
+wVol     = input.float(0.10, "Volatility Weight", minval=0.0, maxval=1.0, step=0.05, group=grp_w)
+wVolume  = input.float(0.15, "Volume & Money Flow Weight", minval=0.0, maxval=1.0, step=0.05, group=grp_w)
+wMarket  = input.float(0.10, "Market Context Weight", minval=0.0, maxval=1.0, step=0.05, group=grp_w)
+wMTF     = input.float(0.10, "Multi-TF Weight", minval=0.0, maxval=1.0, step=0.05, group=grp_w)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░░  HELPER FUNCTIONS  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Normalize value to range [-1, 1]
+normalize(float val, float minV, float maxV) =>
+    math.max(-1.0, math.min(1.0, (val - (minV + maxV) / 2) / ((maxV - minV) / 2)))
+
+// Safe number string helper (prevents NaN/crash)
+safeNum(float val, string fmt) =>
+    na(val) ? "N/A" : str.tostring(val, fmt)
+
+// Auto Higher Timeframe Resolution
+getHTF() =>
+    if timeframe.isseconds or (timeframe.isintraday and timeframe.multiplier <= 5)
+        "60"
+    else if timeframe.isintraday and timeframe.multiplier <= 15
+        "240"
+    else if timeframe.isintraday and timeframe.multiplier <= 60
+        "D"
+    else if timeframe.isintraday
+        "W"
+    else if timeframe.isdaily
+        "W"
+    else if timeframe.isweekly
+        "M"
+    else
+        "M"
+
+htfRes = getHTF()
+
+// Color palette function for table and visuals
+scoreColor(float sc) =>
+    na(sc) ? color.gray : sc >= 0.5 ? color.new(#00c853, 0) : sc >= 0.2 ? color.new(#69f0ae, 0) : sc >= -0.2 ? color.new(#ffd54f, 0) : sc >= -0.5 ? color.new(#ff8a65, 0) : color.new(#ff1744, 0)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░░  0. MARKET REGIME (CHOP INDEX)  ░░░░░░░░░░░░░░░░░░░░
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Choppiness Index (CHOP) - detects consolidation vs trending
+chopSumAtr = math.sum(ta.atr(1), chopLen)
+chopHiLo   = ta.highest(high, chopLen) - ta.lowest(low, chopLen)
+chopVal    = chopHiLo > 0 ? 100 * (math.log10(chopSumAtr / chopHiLo) / math.log10(chopLen)) : 50.0
+isChoppy   = useChopFilter and (chopVal >= chopThresh)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░░░░  1. TREND & CHOP FILTERS  ░░░░░░░░░░░░░░░░░░░░░░░░░░
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- Golden & Death Cross Benchmark (TradingAgents 50 vs 200) ---
+sma50       = ta.sma(close, emaMid)
+sma200      = ta.sma(close, emaSlow)
+goldenCross = sma50 > sma200
+
+crossScore = 0.0
+if useGoldenCross
+    crossScore := goldenCross ? 0.35 : -0.35
+
+// --- EMA ---
+ema21  = ta.ema(close, emaFast)
+ema50  = ta.ema(close, emaMid)
+ema200 = ta.ema(close, emaSlow)
+
+emaScore = 0.0
+emaScore := close > ema200 ? emaScore + 0.30 : emaScore - 0.30
+emaScore := close > ema50  ? emaScore + 0.30 : emaScore - 0.30
+emaScore := ema21 > ema50  ? emaScore + 0.25 : emaScore - 0.25
+if useGoldenCross
+    emaScore := emaScore + crossScore * 0.15
+emaScore := math.max(-1.0, math.min(1.0, emaScore))
+
+// --- ADX / DMI ---
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+adxScore = 0.0
+trendStrength = adxVal > adxThresh
+adxScore := trendStrength ? (diPlus > diMinus ? 1.0 : -1.0) : 0.0
+
+// --- Supertrend ---
+[stLine, stDir] = ta.supertrend(stFactor, stPeriod)
+stScore = stDir == -1 ? 1.0 : -1.0
+
+// --- UT Bot Alerts ---
+utAtr  = ta.atr(utAtrPeriod)
+utLoss = utKey * utAtr
+utHaTicker = ticker.heikinashi(syminfo.tickerid)
+utSrc = utUseHA ? request.security(utHaTicker, timeframe.period, close, lookahead = barmerge.lookahead_off) : close
+
+var float utStop = 0.0
+utStop := utSrc > nz(utStop[1], 0) and utSrc[1] > nz(utStop[1], 0) ? math.max(nz(utStop[1]), utSrc - utLoss) :
+          utSrc < nz(utStop[1], 0) and utSrc[1] < nz(utStop[1], 0) ? math.min(nz(utStop[1]), utSrc + utLoss) : 
+          utSrc > nz(utStop[1], 0) ? utSrc - utLoss : utSrc + utLoss
+          
+var int utPos = 0   
+utPos := utSrc[1] < nz(utStop[1], 0) and utSrc > nz(utStop[1], 0) ? 1 :
+         utSrc[1] > nz(utStop[1], 0) and utSrc < nz(utStop[1], 0) ? -1 : nz(utPos[1], 0)
+
+utScore = useUtBot ? (utPos == 1 ? 0.25 : -0.25) : 0.0
+
+// --- Ichimoku Cloud ---
+tenkan   = (ta.highest(high, 9) + ta.lowest(low, 9)) / 2
+kijun    = (ta.highest(high, 26) + ta.lowest(low, 26)) / 2
+senkouA  = (tenkan + kijun) / 2
+senkouB  = (ta.highest(high, 52) + ta.lowest(low, 52)) / 2
+cloudTop = math.max(senkouA[26], senkouB[26])
+cloudBot = math.min(senkouA[26], senkouB[26])
+
+ichiScore = 0.0
+ichiScore := close > cloudTop ? 0.5 : close < cloudBot ? -0.5 : 0.0
+ichiScore := tenkan > kijun ? ichiScore + 0.25 : ichiScore - 0.25
+ichiScore := close > tenkan ? ichiScore + 0.25 : ichiScore - 0.25
+ichiScore := math.max(-1.0, math.min(1.0, ichiScore))
+
+// --- Smart Money Concepts (SMC) Market Structure & BOS ---
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+var int   marketStructure = 0
+
+smcPh = ta.pivothigh(high, smcLen, smcLen)
+smcPl = ta.pivotlow(low, smcLen, smcLen)
+
+if not na(smcPh)
+    lastSwingHigh := smcPh
+if not na(smcPl)
+    lastSwingLow  := smcPl
+
+bosBull = ta.crossover(close, lastSwingHigh)
+bosBear = ta.crossunder(close, lastSwingLow)
+
+if bosBull
+    marketStructure := 1
+else if bosBear
+    marketStructure := -1
+
+smcScore = 0.0
+if useSMC
+    if bosBull
+        smcScore := 1.0
+    else if bosBear
+        smcScore := -1.0
+    else if marketStructure == 1
+        smcScore := 0.6
+    else if marketStructure == -1
+        smcScore := -0.6
+
+// --- Combined Trend Score ---
+trendScore = useSMC ? (emaScore * 0.25 + adxScore * 0.20 + stScore * 0.15 + ichiScore * 0.20 + smcScore * 0.20) : (emaScore * 0.30 + adxScore * 0.25 + stScore * 0.20 + ichiScore * 0.25)
+trendScore := trendScore + utScore
+trendScore := math.max(-1.0, math.min(1.0, trendScore))
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░░  2. MOMENTUM & DIVERGENCE  ░░░░░░░░░░░░░░░░░░░░░░░░░
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- RSI ---
+rsiVal = ta.rsi(close, rsiLen)
+rsiRising = rsiVal > rsiVal[1]
+rsiFalling = rsiVal < rsiVal[1]
+
+rsiScore = 0.0
+if rsiVal < rsiOS and rsiRising
+    rsiScore := 1.0
+else if rsiVal < rsiOS
+    rsiScore := 0.5
+else if rsiVal > rsiOB and rsiFalling
+    rsiScore := -1.0
+else if rsiVal > rsiOB
+    rsiScore := -0.5
+else
+    rsiScore := normalize(50 - rsiVal, -50, 50) * -1
+
+// --- MACD ---
+[macdLine, signalLine, histLine] = ta.macd(close, macdFast, macdSlow, macdSignal)
+
+macdScore = 0.0
+macdCrossUp   = ta.crossover(macdLine, signalLine)
+macdCrossDown = ta.crossunder(macdLine, signalLine)
+histRising    = histLine > histLine[1]
+histFalling   = histLine < histLine[1]
+
+if macdCrossUp
+    macdScore := 1.0
+else if macdCrossDown
+    macdScore := -1.0
+else if macdLine > signalLine and histRising
+    macdScore := 0.7
+else if macdLine > signalLine
+    macdScore := 0.3
+else if macdLine < signalLine and histFalling
+    macdScore := -0.7
+else
+    macdScore := -0.3
+
+// Above/below zero line bonus
+macdScore := macdLine > 0 ? macdScore + 0.15 : macdScore - 0.15
+macdScore := math.max(-1.0, math.min(1.0, macdScore))
+
+// --- Stochastic RSI ---
+rsi1        = ta.rsi(close, stochLen)
+stochK_raw  = ta.stoch(rsi1, rsi1, rsi1, stochLen)
+stochK      = ta.sma(stochK_raw, stochSmK)
+stochD      = ta.sma(stochK, stochSmD)
+
+stochScore = 0.0
+if stochK < 20 and stochK > stochD
+    stochScore := 1.0
+else if stochK < 20
+    stochScore := 0.5
+else if stochK > 80 and stochK < stochD
+    stochScore := -1.0
+else if stochK > 80
+    stochScore := -0.5
+else
+    stochScore := stochK > stochD ? 0.3 : -0.3
+
+// --- Divergence Engine (RSI Pivot Divergence) ---
+var float prevPlPrice = na
+var float prevPlRsi   = na
+var int   prevPlBar   = 0
+
+var float prevPhPrice = na
+var float prevPhRsi   = na
+var int   prevPhBar   = 0
+
+bullishDiv    = false
+bearishDiv    = false
+hiddenBullDiv = false
+hiddenBearDiv = false
+
+pl = ta.pivotlow(low, divLeft, divRight)
+if not na(pl)
+    curPlPrice = pl
+    curPlRsi   = rsiVal[divRight]
+    if not na(prevPlPrice) and (bar_index - prevPlBar <= 60) and (bar_index - prevPlBar >= divLeft)
+        if curPlPrice < prevPlPrice and curPlRsi > prevPlRsi
+            bullishDiv := true
+        if curPlPrice > prevPlPrice and curPlRsi < prevPlRsi
+            hiddenBullDiv := true
+    prevPlPrice := curPlPrice
+    prevPlRsi   := curPlRsi
+    prevPlBar   := bar_index - divRight
+
+ph = ta.pivothigh(high, divLeft, divRight)
+if not na(ph)
+    curPhPrice = ph
+    curPhRsi   = rsiVal[divRight]
+    if not na(prevPhPrice) and (bar_index - prevPhBar <= 60) and (bar_index - prevPhBar >= divLeft)
+        if curPhPrice > prevPhPrice and curPhRsi < prevPhRsi
+            bearishDiv := true
+        if curPhPrice < prevPhPrice and curPhRsi > prevPhRsi
+            hiddenBearDiv := true
+    prevPhPrice := curPhPrice
+    prevPhRsi   := curPhRsi
+    prevPhBar   := bar_index - divRight
+
+var int lastBullDivBar = 0
+var int lastBearDivBar = 0
+if bullishDiv
+    lastBullDivBar := bar_index
+if bearishDiv
+    lastBearDivBar := bar_index
+
+bullDivActive = (bar_index - lastBullDivBar) <= 6
+bearDivActive = (bar_index - lastBearDivBar) <= 6
+
+// Divergence Score Boost (applied if feature enabled)
+divScore = 0.0
+if useDivFilter
+    if bullDivActive
+        divScore := 0.4
+    else if bearDivActive
+        divScore := -0.4
+
+// --- Combined Momentum Score ---
+momScore = (rsiScore * 0.30 + macdScore * 0.35 + stochScore * 0.20 + divScore * 0.15)
+momScore := math.max(-1.0, math.min(1.0, momScore))
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░░  3. VOLATILITY & ADAPTIVE BB  ░░░░░░░░░░░░░░░░░░░░░░
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- Bollinger Bands ---
+bbBasis = ta.sma(close, bbLen)
+bbDev   = bbMult * ta.stdev(close, bbLen)
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+bbWidth = (bbUpper - bbLower) / bbBasis * 100
+
+// --- Adaptive BB Score (Prevents Counter-trend "Walking the Bands" trap) ---
+bbScore = 0.0
+isStrongTrend = adxVal > adxThresh
+
+if isStrongTrend
+    // In strong trend: price riding bands is continuation, not reversal!
+    if trendScore > 0.2
+        bbScore := close >= bbUpper ? 0.6 : (close <= bbBasis and close >= bbLower ? 0.5 : 0.1)
+    else if trendScore < -0.2
+        bbScore := close <= bbLower ? -0.6 : (close >= bbBasis and close <= bbUpper ? -0.5 : -0.1)
+    else
+        bbScore := normalize(bbBasis - close, -(bbUpper - bbBasis), bbUpper - bbBasis) * -1
+else
+    // In range / mean-reversion mode: bands act as classic boundaries
+    if close <= bbLower
+        bbScore := 1.0
+    else if close >= bbUpper
+        bbScore := -1.0
+    else
+        bbScore := normalize(bbBasis - close, -(bbUpper - bbBasis), bbUpper - bbBasis) * -1
+
+// --- Squeeze Momentum Indicator ---
+kcMa       = ta.sma(close, kcLen)
+kcRangeVal = useTrueRange ? ta.tr : (high - low)
+kcRangeMa  = ta.sma(kcRangeVal, kcLen)
+kcUpper    = kcMa + kcRangeMa * kcMult
+kcLower    = kcMa - kcRangeMa * kcMult
+
+sqzOn  = (bbLower > kcLower) and (bbUpper < kcUpper)
+sqzOff = (bbLower < kcLower) and (bbUpper > kcUpper)
+noSqz  = not sqzOn and not sqzOff
+
+// Linear Regression Momentum
+sqzVal = ta.linreg(close - math.avg(math.avg(ta.highest(high, kcLen), ta.lowest(low, kcLen)), ta.sma(close, kcLen)), kcLen, 0)
+sqzValRising  = sqzVal > nz(sqzVal[1])
+sqzValFalling = sqzVal < nz(sqzVal[1])
+
+sqzBullAccel = sqzVal > 0 and sqzValRising
+sqzBullDecel = sqzVal > 0 and sqzValFalling
+sqzBearAccel = sqzVal < 0 and sqzValFalling
+sqzBearDecel = sqzVal < 0 and sqzValRising
+
+sqzFiredUp   = sqzOn[1] and sqzOff and sqzVal > 0
+sqzFiredDown = sqzOn[1] and sqzOff and sqzVal < 0
+
+// Squeeze Score Calculation
+sqzScore = 0.0
+if sqzFiredUp
+    sqzScore := 1.0
+else if sqzFiredDown
+    sqzScore := -1.0
+else if sqzBullAccel
+    sqzScore := 0.75
+else if sqzBullDecel
+    sqzScore := 0.25
+else if sqzBearAccel
+    sqzScore := -0.75
+else if sqzBearDecel
+    sqzScore := -0.25
+
+if sqzOn
+    sqzScore := sqzScore * 0.5
+
+// --- ATR ---
+atrVal = ta.atr(atrLen)
+
+// --- Combined Volatility Score ---
+volScore = useSqueeze ? (bbScore * 0.4 + sqzScore * 0.6) : bbScore
+volScore := math.max(-1.0, math.min(1.0, volScore))
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░  4. VOLUME & MONEY FLOW (TRADINGAGENTS SUITE)  ░░░░░░░░░░░░░░
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- Volume SMA ---
+volSma   = ta.sma(volume, volSmaLen)
+volAbove = volume > volSma
+volSpike = volume > volSma * volSpikeMul
+
+// --- OBV ---
+obvVal     = ta.obv
+obvEma     = ta.ema(obvVal, 21)
+obvRising  = obvVal > obvEma
+
+// --- VWAP ---
+vwapVal        = ta.vwap(hlc3)
+priceAboveVwap = close > vwapVal
+
+// --- Chaikin Money Flow (CMF - math.sum extracted from ternary for compiler consistency) ---
+candleRange = high - low
+cmfMultiplier = candleRange != 0 ? ((close - low) - (high - close)) / candleRange : 0.0
+cmfVol = cmfMultiplier * volume
+sumCmfVol = math.sum(cmfVol, cmfLen)
+sumVol = math.sum(volume, cmfLen)
+cmfVal = sumVol != 0 ? sumCmfVol / sumVol : 0.0
+cmfScore = normalize(cmfVal, -0.25, 0.25)
+
+// --- MFI (Money Flow Index - TradingAgents) ---
+mfiVal = ta.mfi(hlc3, mfiLen)
+mfiScore = 0.0
+if mfiVal < 20
+    mfiScore := 1.0
+else if mfiVal > 80
+    mfiScore := -1.0
+else
+    mfiScore := normalize(50 - mfiVal, -50, 50) * -1
+
+// --- VWMA vs SMA (Volume-Weighted Moving Average - TradingAgents) ---
+vwmaVal = ta.vwma(close, vwmaLen)
+smaBench = ta.sma(close, vwmaLen)
+vwmaBull = vwmaVal > smaBench
+
+vwmaScore = 0.0
+if vwmaBull
+    vwmaScore := close > vwmaVal ? 0.8 : 0.4
+else
+    vwmaScore := close < vwmaVal ? -0.8 : -0.4
+
+// --- Volume Flow Indicator (VFI - Markos Katsanos) ---
+vfiInter   = math.log(hlc3) - math.log(hlc3[1])
+vfiVinter  = ta.stdev(vfiInter, 30)
+vfiCutoff  = vfiCoef * vfiVinter * close
+vfiAve     = ta.sma(volume[1], vfiLength)
+vfiVmax    = vfiAve * 2.5
+vfiVc      = volume < vfiVmax ? volume : vfiVmax
+vfiMf      = hlc3 - hlc3[1]
+vfiDir     = vfiMf > vfiCutoff ? vfiVc : vfiMf < -vfiCutoff ? -vfiVc : 0.0
+vfiSum     = math.sum(vfiDir, vfiLength)
+vfiVal     = vfiAve != 0 ? (vfiSum / vfiAve) / 10.0 : 0.0
+vfiBull    = vfiVal > 0 and vfiVal > nz(vfiVal[1])
+vfiScore   = normalize(vfiVal, -1.0, 1.0)
+
+// --- Combined Volume Score ---
+volumeScore = 0.0
+if volAbove
+    volumeScore := close > close[1] ? 0.20 : -0.20
+else
+    volumeScore := 0.0
+
+volumeScore := obvRising ? volumeScore + 0.20 : volumeScore - 0.20
+volumeScore := priceAboveVwap ? volumeScore + 0.15 : volumeScore - 0.15
+
+if useCMF
+    volumeScore := volumeScore + cmfScore * 0.15
+
+if useMFI
+    volumeScore := volumeScore + mfiScore * 0.15
+
+if useVWMA
+    volumeScore := volumeScore + vwmaScore * 0.15
+
+if useVFI
+    volumeScore := volumeScore + vfiScore * 0.15
+
+if volSpike
+    volumeScore := close > close[1] ? volumeScore + 0.10 : volumeScore - 0.10
+
+volumeScore := math.max(-1.0, math.min(1.0, volumeScore))
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░░  5. MARKET CONTEXT  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// ══════════════════════════════════════════════════════════════════════════════
+
+spxClose = request.security(spxSymbol, timeframe.period, close[1], lookahead=barmerge.lookahead_off)
+spxEma50 = request.security(spxSymbol, timeframe.period, ta.ema(close, 50)[1], lookahead=barmerge.lookahead_off)
+spxEma21 = request.security(spxSymbol, timeframe.period, ta.ema(close, 21)[1], lookahead=barmerge.lookahead_off)
+spxBullish = not na(spxClose) and not na(spxEma50) and not na(spxEma21) and (spxClose > spxEma50 and spxEma21 > spxEma50)
+
+vixClose = request.security(vixSymbol, timeframe.period, close[1], lookahead=barmerge.lookahead_off)
+vixHigh  = not na(vixClose) and (vixClose > 30)
+vixLow   = not na(vixClose) and (vixClose < 20)
+
+nasdaqClose = request.security(nasdaqSymbol, timeframe.period, close[1], lookahead=barmerge.lookahead_off)
+nasdaqEma50 = request.security(nasdaqSymbol, timeframe.period, ta.ema(close, 50)[1], lookahead=barmerge.lookahead_off)
+nasdaqBullish = not na(nasdaqClose) and not na(nasdaqEma50) and (nasdaqClose > nasdaqEma50)
+
+marketScore = 0.0
+if useMarketCtx
+    marketScore := spxBullish ? marketScore + 0.4 : marketScore - 0.4
+    marketScore := vixHigh ? marketScore - 0.3 : vixLow ? marketScore + 0.3 : marketScore
+    marketScore := nasdaqBullish ? marketScore + 0.3 : marketScore - 0.3
+    marketScore := math.max(-1.0, math.min(1.0, marketScore))
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░░  6. MULTI-TIMEFRAME (NON-REPAINTING)  ░░░░░░░░░░░░░░░
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Using [1] on higher timeframe data prevents lookahead bias and historical repainting
+htfClose    = request.security(syminfo.tickerid, htfRes, close[1], lookahead=barmerge.lookahead_off)
+htfEma21    = request.security(syminfo.tickerid, htfRes, ta.ema(close, 21)[1], lookahead=barmerge.lookahead_off)
+htfEma50    = request.security(syminfo.tickerid, htfRes, ta.ema(close, 50)[1], lookahead=barmerge.lookahead_off)
+htfRsi      = request.security(syminfo.tickerid, htfRes, ta.rsi(close, 14)[1], lookahead=barmerge.lookahead_off)
+htfMacdLine = request.security(syminfo.tickerid, htfRes, (ta.ema(close, macdFast) - ta.ema(close, macdSlow))[1], lookahead=barmerge.lookahead_off)
+htfMacdSig  = request.security(syminfo.tickerid, htfRes, ta.ema(ta.ema(close, macdFast) - ta.ema(close, macdSlow), macdSignal)[1], lookahead=barmerge.lookahead_off)
+
+mtfScore = 0.0
+if useMTF
+    mtfScore := not na(htfClose) and not na(htfEma50) and htfClose > htfEma50 ? mtfScore + 0.35 : mtfScore - 0.35
+    mtfScore := not na(htfEma21) and not na(htfEma50) and htfEma21 > htfEma50 ? mtfScore + 0.25 : mtfScore - 0.25
+    mtfScore := not na(htfRsi) and htfRsi > 50 ? mtfScore + 0.15 : mtfScore - 0.15
+    mtfScore := not na(htfMacdLine) and not na(htfMacdSig) and htfMacdLine > htfMacdSig ? mtfScore + 0.25 : mtfScore - 0.25
+    mtfScore := math.max(-1.0, math.min(1.0, mtfScore))
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░░  7. COMPOSITE SCORE  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// ══════════════════════════════════════════════════════════════════════════════
+
+totalWeight = wTrend + wMom + wVol + wVolume + (useMarketCtx ? wMarket : 0) + (useMTF ? wMTF : 0)
+
+compositeScore = (trendScore * wTrend +
+                  momScore * wMom +
+                  volScore * wVol +
+                  volumeScore * wVolume +
+                  (useMarketCtx ? marketScore * wMarket : 0) +
+                  (useMTF ? mtfScore * wMTF : 0)) / totalWeight
+
+compositeScore := math.max(-1.0, math.min(1.0, compositeScore))
+
+// Plot composite score invisibly so it is accessible as plot_0 in alerts
+// plot(compositeScore, "Composite Score Value", display=display.none)
+// plot(trendScore, "Trend Score Value", display=display.none)
+// plot(momScore, "Momentum Score Value", display=display.none)
+// plot(volumeScore, "Volume Score Value", display=display.none)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░░  8. PRICE ACTION & SIGNAL FILTERS  ░░░░░░░░░░░░░░░░░░
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Cooldown mechanism
+var int lastSignalBar = 0
+barsSinceSignal = bar_index - lastSignalBar
+
+// Candlestick Confirmation
+cUpperWick = high - math.max(open, close)
+cLowerWick = math.min(open, close) - low
+paConfirmBuy  = not useCandleFilter or (close >= open and close >= (high + low) * 0.48 and (candleRange == 0 or cUpperWick <= candleRange * 0.45))
+paConfirmSell = not useCandleFilter or (close <= open and close <= (high + low) * 0.52 and (candleRange == 0 or cLowerWick <= candleRange * 0.45))
+
+// Session Filter
+inSession = not useSessionFilter or not na(time(timeframe.period, sessTime))
+
+// --- Timeframe Auto-Adaptation Logic ---
+tfInMinutes = timeframe.isseconds ? (timeframe.multiplier / 60.0) : timeframe.isminutes ? (timeframe.multiplier * 1.0) : timeframe.isdaily ? 1440.0 : timeframe.isweekly ? 10080.0 : timeframe.ismonthly ? 43200.0 : 60.0
+
+is1m     = tfInMinutes <= 1.0
+is5m     = tfInMinutes > 1.0 and tfInMinutes <= 5.0
+is15m    = tfInMinutes > 5.0 and tfInMinutes <= 15.0
+is30m    = tfInMinutes > 15.0 and tfInMinutes <= 30.0
+is1hPlus = tfInMinutes > 30.0
+
+tfProfileName = is1m ? "⚠ SCALP (1m)" : is5m ? "SCALP (5m)" : is15m ? "SWING (15m)" : is30m ? "SWING (30m)" : "TREND (1h+)"
+
+// ═══════════════════════════════════════════════════════════════════
+// Dynamic parameters PROVEN PROFITABLE through SPY grid search
+// ═══════════════════════════════════════════════════════════════════
+
+// Signal & Filter Adaptation
+effEarlyReversal = useAutoAdaptiveTF ? is1hPlus : useEarlyReversal
+effRequireEma200 = useAutoAdaptiveTF ? (is5m or is15m) : requireEma200
+effRequireVol    = useAutoAdaptiveTF ? (is15m or is1hPlus) : requireVolAbove
+effRequireBOS    = useAutoAdaptiveTF ? false : requireBullStructure
+effBlockHistDrop = useAutoAdaptiveTF ? false : blockOnHistDrop
+
+// Threshold Adaptation (per-TF optimized)
+effBuyThresh     = useAutoAdaptiveTF ? (is1m ? 0.40 : is5m ? 0.50 : is15m ? 0.40 : is30m ? 0.30 : 0.50) : buyThreshold
+effSellThresh    = useAutoAdaptiveTF ? (is1m ? -0.40 : is5m ? -0.50 : is15m ? -0.40 : is30m ? -0.30 : -0.50) : sellThreshold
+effEarlyThresh   = useAutoAdaptiveTF ? 0.15 : earlyBuyThresh
+
+// Cooldown Adaptation
+effCooldown      = useAutoAdaptiveTF ? (is1hPlus ? 5 : is15m ? 3 : 5) : cooldownBars
+
+// Chop Threshold Adaptation
+effChopThresh    = useAutoAdaptiveTF ? (is15m ? 58.0 : is1hPlus ? 58.0 : 60.0) : chopThresh
+
+// Fibonacci Lookback Adaptation (scales with timeframe)
+// 1m: 390 (1 day), 5m: 200 (2.5 days), 15m: 150 (4 days), 30m: 120 (1 week), 1h: 100
+effFibLookback   = useAutoAdaptiveTF ? (is1m ? 390 : is5m ? 200 : is15m ? 150 : is30m ? 120 : 100) : baseFibLookback
+
+// Risk Management Adaptation (SL/TP/BE — proven profitable per TF)
+effSlMult    = useAutoAdaptiveTF ? (is1m ? 2.5 : is5m ? 1.5 : is15m ? 2.5 : is30m ? 2.5 : 1.5) : slAtrMult
+effTpMult    = useAutoAdaptiveTF ? (is1m ? 3.0 : is5m ? 2.5 : is15m ? 2.5 : is30m ? 1.5 : 3.0) : tpAtrMult
+effBeTrigger = useAutoAdaptiveTF ? (is15m ? 2.0 : is1hPlus ? 1.5 : 99.0) : beTriggerAtr
+// Note: effBeTrigger=99.0 for 5m/30m effectively disables Break-Even (proven harmful on fast TFs)
+
+// Core filters
+volumeConfirm      = not effRequireVol or volAbove
+notContradictBuy   = not (trendScore < -0.5 and momScore < -0.5)
+notContradictSell  = not (trendScore > 0.5 and momScore > 0.5)
+regimeAllowed      = not (useChopFilter and chopVal >= effChopThresh)
+ema200ConfirmBuy   = not effRequireEma200 or close > ema200
+ema200ConfirmSell  = not effRequireEma200 or close < ema200
+rsiFilterBuy       = not useRsiFilter or rsiVal <= rsiMaxBuyLevel
+rsiFilterSell      = not useRsiFilter or rsiVal >= rsiMinSellLevel
+macdHistDropBuy    = effBlockHistDrop and macdLine > 0 and histLine < histLine[1] and histLine[1] < histLine[2]
+macdOverextendedBuy = macdLine > atrVal * macdMaxAtrMult
+macdFilterBuy      = not useMacdFilter or not (macdHistDropBuy or macdOverextendedBuy)
+macdHistRiseSell   = effBlockHistDrop and macdLine < 0 and histLine > histLine[1] and histLine[1] > histLine[2]
+macdOverextendedSell = macdLine < -atrVal * macdMaxAtrMult
+macdFilterSell     = not useMacdFilter or not (macdHistRiseSell or macdOverextendedSell)
+smcFilterBuy       = not effRequireBOS or marketStructure >= 0
+smcFilterSell      = not effRequireBOS or marketStructure <= 0
+
+// --- UT Bot Strict Filter ---
+utBotConfirmBuy    = not requireUtBot or utPos == 1
+utBotConfirmSell   = not requireUtBot or utPos == -1
+
+// --- Standard Trend-Following Signals (Ideal for 30m / 1h) ---
+standardBuy  = compositeScore >= effBuyThresh and barsSinceSignal >= effCooldown and volumeConfirm and notContradictBuy and regimeAllowed and paConfirmBuy and inSession and ema200ConfirmBuy and rsiFilterBuy and macdFilterBuy and smcFilterBuy and utBotConfirmBuy
+standardSell = compositeScore <= effSellThresh and barsSinceSignal >= effCooldown and volumeConfirm and notContradictSell and regimeAllowed and paConfirmSell and inSession and ema200ConfirmSell and rsiFilterSell and macdFilterSell and smcFilterSell and utBotConfirmSell
+
+// Pre-calculate stateful functions to prevent execution warnings
+crossEma21Up   = ta.crossover(close, ema21)
+crossEma21Down = ta.crossunder(close, ema21)
+crossOpenUp    = ta.crossover(close, open)
+crossOpenDown  = ta.crossunder(close, open)
+crossStochUp   = ta.crossover(stochK, stochD)
+crossStochDown = ta.crossunder(stochK, stochD)
+// --- Fibonacci Calculations (Dynamic Lookback) ---
+macroHigh = ta.highest(high, effFibLookback)
+macroLow  = ta.lowest(low, effFibLookback)
+fibRange  = macroHigh - macroLow
+fib236    = macroHigh - fibRange * 0.236
+fib382    = macroHigh - fibRange * 0.382
+fib500    = macroHigh - fibRange * 0.500
+fib618    = macroHigh - fibRange * 0.618
+fib786    = macroHigh - fibRange * 0.786
+
+fibFilterBuy  = useFibFilter ? (close <= fib500) : true
+fibFilterSell = useFibFilter ? (close >= fib500) : true
+
+// --- Early Reversal Signals (Point 2 B - Ideal for 1m / 5m / 15m Scalping) ---
+earlyDivTriggerBuy    = useDivTrigger and (bullishDiv or (bullDivActive and crossEma21Up))
+earlySqzTriggerBuy    = useSqzFireTrigger and (sqzFiredUp or (sqzBearDecel and crossOpenUp))
+earlyStochTriggerBuy  = useStochTrigger and (crossStochUp and stochK < 40)
+earlyBuyCondition     = earlyDivTriggerBuy or earlySqzTriggerBuy or earlyStochTriggerBuy
+earlyBuySafety        = (not requireEma50Early or close > ema50) and regimeAllowed and notContradictBuy and inSession and (close >= open or close > close[1]) and rsiFilterBuy and fibFilterBuy
+earlyBuySignal        = effEarlyReversal and earlyBuyCondition and earlyBuySafety and compositeScore >= effEarlyThresh and barsSinceSignal >= effCooldown and utBotConfirmBuy
+
+earlyDivTriggerSell   = useDivTrigger and (bearishDiv or (bearDivActive and crossEma21Down))
+// Squeeze dark green requires either an EMA21 breakdown OR a valid strict bearish divergence
+earlySqzTriggerSell   = useSqzFireTrigger and (sqzFiredDown or (sqzBullDecel and crossEma21Down) or (sqzBullDecel and bearishDiv))
+earlyStochTriggerSell = useStochTrigger and (crossStochDown and stochK > 60)
+earlySellCondition    = earlyDivTriggerSell or earlySqzTriggerSell or earlyStochTriggerSell
+earlySellSafety       = (not requireEma50Early or close < ema50) and regimeAllowed and notContradictSell and inSession and (close <= open or close < close[1]) and rsiFilterSell and fibFilterSell
+earlySellSignal       = effEarlyReversal and earlySellCondition and earlySellSafety and compositeScore <= -effEarlyThresh and barsSinceSignal >= effCooldown and utBotConfirmSell
+
+// **** COMBINED FINAL SIGNALS ****
+buySignal       = standardBuy or earlyBuySignal
+sellSignal      = standardSell or earlySellSignal
+
+isEarlyOnlyBuy  = earlyBuySignal and not standardBuy
+isEarlyOnlySell = earlySellSignal and not standardSell
+
+if buySignal or sellSignal
+    lastSignalBar := bar_index
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░░  9. STRATEGY & BREAK-EVEN EXECUTION  ░░░░░░░░░░░░░░░░
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Bar confirmed flag: table updates in real time on ticks, but strategy orders execute only on bar close
+barConfirmed = barstate.isconfirmed or not barstate.isrealtime
+
+atrSL = atrVal * effSlMult
+atrTP = atrVal * effTpMult
+
+var bool  buyBeTriggered = false
+var bool  sellBeTriggered = false
+
+// --- Chandelier Exit Calculation (Chuck LeBeau) ---
+ceAtrVal    = ta.atr(ceAtrPeriod)
+ceHigh      = ta.highest(high, ceAtrPeriod)
+ceLow       = ta.lowest(low, ceAtrPeriod)
+ceLongStop  = ceHigh - ceAtrVal * ceMult
+ceShortStop = ceLow + ceAtrVal * ceMult
+
+var float ceTrailingLong  = na
+// --- OSCILLATOR PLOTS ---
+// Järjekord: kõige tähtsam esimene (mida kauplejas peab kõige rohkem jälgima)
+
+grp_osc = "═══ 🏆 Peamised Skoorid (Tähtsuse järjekorras) ═══"
+showComp   = input.bool(true, "1. 🥇 COMPOSITE — Lõppskoor (kõige tähtsam!)", group=grp_osc)
+showTrend  = input.bool(false, "2. 🥈 Trend Score — Trendi suund ja tugevus", group=grp_osc)
+showMom    = input.bool(false, "3. 🥉 Momentum Score — Kiirus ja jõud", group=grp_osc)
+showVol    = input.bool(false, "4. Volume Score — Mahu kinnitus", group=grp_osc)
+
+grp_sub = "═══ 📊 Üksikud Indikaatorid (Tähtsuse järjekorras) ═══"
+showSmc    = input.bool(false, "1. SMC (Market Structure) — Institutsionaalne struktuur", group=grp_sub)
+showMacd   = input.bool(false, "2. MACD — Trendi pöörded ja momentum", group=grp_sub)
+showRsi    = input.bool(false, "3. RSI — Üleostetud/ülemüüdud tsoonid", group=grp_sub)
+showSqz    = input.bool(false, "4. Squeeze — Volatiilsuse plahvatus", group=grp_sub)
+showEma    = input.bool(false, "5. EMA & Golden/Death Cross", group=grp_sub)
+showSt     = input.bool(false, "6. Supertrend — Trendi suund", group=grp_sub)
+showAdx    = input.bool(false, "7. ADX — Trendi tugevus (mitte suund)", group=grp_sub)
+showIchi   = input.bool(false, "8. Ichimoku — Pilve toetus/vastupanu", group=grp_sub)
+showStoch  = input.bool(false, "9. StochRSI — Lühiajaline pöörde signaal", group=grp_sub)
+showMfi    = input.bool(false, "10. MFI — Raha liikumine (mahuga RSI)", group=grp_sub)
+showCmf    = input.bool(false, "11. CMF — Chaikin Money Flow", group=grp_sub)
+showVfi    = input.bool(false, "12. VFI — Volume Flow (Katsanos)", group=grp_sub)
+showVwma   = input.bool(false, "13. VWMA — Mahuga kaalutud trend", group=grp_sub)
+showMtf    = input.bool(false, "14. Multi-TF — Kõrgem ajaraam kinnitab", group=grp_sub)
+showMkt    = input.bool(false, "15. Market Context — SPX/VIX/NASDAQ makro", group=grp_sub)
+
+grp_lbl = "═══ 🏷️ Oleku Sildid (Labels) ═══"
+showSigLabel = input.bool(false, "1. 🔔 BUY / SELL signaalid", group=grp_lbl)
+showDivLabel = input.bool(false, "2. ⚠️ Divergentsi sildid (BULL/BEAR DIV)", group=grp_lbl)
+showSmcLabel = input.bool(false, "3. SMC BOS sildid (struktuuri murded)", group=grp_lbl)
+showSqzLabel = input.bool(false, "4. Squeeze oleku sildid (FIRE UP/DN)", group=grp_lbl)
+showRegLabel = input.bool(false, "5. Režiimi sildid (TREND vs CHOP)", group=grp_lbl)
+showPaLabel  = input.bool(false, "6. Price Action (BULL/BEAR CLOSE)", group=grp_lbl)
+
+// === Plots (Tähtsuse järjekorras) ===
+plot(showComp ? compositeScore : na, 'Composite Score', color=compositeScore >= buyThreshold ? color.new(#00c853, 0) : compositeScore <= sellThreshold ? color.new(#ff1744, 0) : color.new(#9e9e9e, 0), linewidth=3, style=plot.style_columns)
+plot(showTrend ? trendScore : na, 'Trend Score', color=color.new(#2196f3, 0), linewidth=2)
+plot(showMom ? momScore : na, 'Momentum Score', color=color.new(#ff9800, 0), linewidth=2)
+plot(showVol ? volumeScore : na, 'Volume Score', color=color.new(#9c27b0, 0), linewidth=2)
+
+plot(showSmc ? smcScore : na, 'SMC Score', color=color.new(#ffca28, 0), linewidth=1)
+plot(showMacd ? macdScore : na, 'MACD Score', color=color.new(#ffa726, 0), linewidth=1)
+plot(showRsi ? rsiScore : na, 'RSI Score', color=color.new(#66bb6a, 0), linewidth=1)
+plot(showSqz ? sqzScore : na, 'Squeeze Score', color=color.new(#8d6e63, 0), linewidth=1)
+plot(showEma ? emaScore : na, 'EMA Score', color=color.new(#26a69a, 0), linewidth=1)
+plot(showSt ? stScore : na, 'Supertrend Score', color=color.new(#ab47bc, 0), linewidth=1)
+plot(showAdx ? adxScore : na, 'ADX Score', color=color.new(#ef5350, 0), linewidth=1)
+plot(showIchi ? ichiScore : na, 'Ichimoku Score', color=color.new(#29b6f6, 0), linewidth=1)
+plot(showStoch ? stochScore : na, 'StochRSI Score', color=color.new(#ec407a, 0), linewidth=1)
+plot(showMfi ? mfiScore : na, 'MFI Score', color=color.new(#00bcd4, 0), linewidth=1)
+plot(showCmf ? cmfScore : na, 'CMF Score', color=color.new(#e91e63, 0), linewidth=1)
+plot(showVfi ? vfiScore : na, 'VFI Score', color=color.new(#4caf50, 0), linewidth=1)
+plot(showVwma ? vwmaScore : na, 'VWMA Score', color=color.new(#ff5722, 0), linewidth=1)
+plot(showMtf ? mtfScore : na, 'Multi-TF Score', color=color.new(#795548, 0), linewidth=1)
+plot(showMkt ? marketScore : na, 'Market Ctx Score', color=color.new(#607d8b, 0), linewidth=1)
+
+// === Reference Lines ===
+hline(0, 'Zero Line', color=color.gray, linestyle=hline.style_dashed)
+hline(buyThreshold, 'Buy Thresh', color=color.new(#00c853, 50), linestyle=hline.style_dotted)
+hline(sellThreshold, 'Sell Thresh', color=color.new(#ff1744, 50), linestyle=hline.style_dotted)
+
+// === Status Labels (Tähtsuse järjekorras) ===
+// 1. BUY / SELL signaalid (kõige tähtsam — otseselt kauplemisotsuse aluseks)
+if showSigLabel and barstate.isconfirmed and buySignal
+    label.new(bar_index, -0.95, isEarlyOnlyBuy ? "⚡BUY" : "BUY", style=label.style_label_up, color=color.new(#00c853, 0), textcolor=color.white, size=size.small)
+if showSigLabel and barstate.isconfirmed and sellSignal
+    label.new(bar_index, 0.95, isEarlyOnlySell ? "⚡SELL" : "SELL", style=label.style_label_down, color=color.new(#ff1744, 0), textcolor=color.white, size=size.small)
+
+// 2. Divergents (varajane hoiatus pöördele — väga oluline)
+if showDivLabel and barstate.isconfirmed and bullishDiv
+    label.new(bar_index, -0.9, "BULL DIV", style=label.style_label_up, color=color.new(#00c853, 20), textcolor=color.white, size=size.tiny)
+if showDivLabel and barstate.isconfirmed and bearishDiv
+    label.new(bar_index, 0.9, "BEAR DIV", style=label.style_label_down, color=color.new(#ff1744, 20), textcolor=color.white, size=size.tiny)
+
+// 3. SMC BOS (struktuuri murd — oluline)
+smcStatusText = bosBull ? "BULL BOS ↑" : bosBear ? "BEAR BOS ↓" : marketStructure == 1 ? "BULL" : marketStructure == -1 ? "BEAR" : ""
+if showSmcLabel and barstate.isconfirmed and (bosBull or bosBear)
+    smcLblCol = bosBull ? color.new(#00c853, 20) : color.new(#ff1744, 20)
+    label.new(bar_index, bosBull ? -0.7 : 0.7, smcStatusText, style=bosBull ? label.style_label_up : label.style_label_down, color=smcLblCol, textcolor=color.white, size=size.tiny)
+
+// 4. Squeeze (volatiilsuse plahvatus — oluline)
+sqzStatusText = sqzOn ? "SQZ ON" : sqzFiredUp ? "FIRE UP ↑" : sqzFiredDown ? "FIRE DN ↓" : sqzBullAccel ? "BULL ACCEL" : sqzBullDecel ? "BULL SLOW" : sqzBearAccel ? "BEAR ACCEL" : "BEAR SLOW"
+sqzLblColor = sqzFiredUp ? color.new(#00e676, 20) : sqzFiredDown ? color.new(#ff1744, 20) : sqzOn ? color.new(#ff9800, 20) : color.new(color.gray, 50)
+if showSqzLabel and barstate.isconfirmed and (sqzOn or sqzFiredUp or sqzFiredDown)
+    label.new(bar_index, -0.8, sqzStatusText, style=label.style_label_up, color=sqzLblColor, textcolor=color.white, size=size.tiny)
+
+// 5. Režiim — TREND vs CHOP (kontekst)
+if showRegLabel and barstate.isconfirmed
+    regText = isChoppy ? "CHOP" : "TREND"
+    regCol = isChoppy ? color.new(#ff9800, 30) : color.new(#00c853, 30)
+    label.new(bar_index, 0.95, regText, style=label.style_label_down, color=regCol, textcolor=color.white, size=size.tiny)
+
+// 6. Price Action — BULL/BEAR CLOSE (täiendav kontekst)
+paStatusText = paConfirmBuy and paConfirmSell ? "BALANCED" : paConfirmBuy ? "BULL CLOSE" : paConfirmSell ? "BEAR CLOSE" : "NEUTRAL"
+paLblColor = paConfirmBuy and not paConfirmSell ? color.new(#00c853, 20) : paConfirmSell and not paConfirmBuy ? color.new(#ff1744, 20) : color.new(color.gray, 20)
+if showPaLabel and barstate.isconfirmed
+    label.new(bar_index, compositeScore, paStatusText, style=label.style_label_down, color=paLblColor, textcolor=color.white, size=size.tiny)
